@@ -12,7 +12,7 @@ A minimal, readable LLM inference engine that implements the core ideas behind p
 | Continuous batching | Dynamic request admission and completion |
 | Chunked prefill | Token-budget scheduling, decode interleaving |
 | Speculative decoding | N-gram proposer + greedy verifier |
-| Weight-only quantization | Per-channel INT8/INT4 with memory benchmarks |
+| Weight-only quantization | Per-channel INT8/INT4 with memory benchmarks, NF4 via bitsandbytes |
 | OpenAI-compatible serving | FastAPI, SSE streaming, /metrics |
 
 ## Quickstart
@@ -62,6 +62,7 @@ python nanovllm_pp/benchmarks/bench_baseline.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_chunked_prefill.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
 ```
 
@@ -84,7 +85,14 @@ curl -X POST http://localhost:8000/v1/completions \
   -d '{"model":"qwen3","prompt":"Hello","max_tokens":16,"temperature":0.0}'
 ```
 
-## Profiling
+## Quantized inference (NF4)
+
+```python
+from nanovllm_pp import LLM, SamplingParams
+
+# Load with NF4 quantization — ~50% memory reduction
+llm = LLM("./Qwen3-0.6B", load_in_4bit=True)
+```
 
 ```python
 from nanovllm_pp import LLM, SamplingParams
