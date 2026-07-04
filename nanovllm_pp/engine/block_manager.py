@@ -3,20 +3,19 @@ import json
 
 
 def compute_block_hash(parent_hash, block_tokens):
-    """Chained hash: each block's hash depends on its parent and its tokens.
+    """Hash a KV block based on its parent block and local token IDs.
 
     When two sequences share a token prefix, their corresponding blocks
-    produce identical hashes, enabling zero-overhead KV cache reuse.
+    produce identical hashes, enabling prefix-aware KV cache reuse.
     """
     return hash((parent_hash, tuple(block_tokens)))
 
 
 class Block:
-    """A single KV cache page — the atomic unit of VRAM allocation.
+    """A KV cache page — a fixed-size chunk of per-layer key-value memory.
 
-    Each block stores key-value tensors for block_size tokens across all
-    layers and attention heads. Reference counting enables safe sharing
-    between sequences that have matching token prefixes.
+    Reference counting tracks how many sequences share this block.
+    When ref_count reaches zero, the block returns to the free pool.
     """
 
     def __init__(self, block_id: int):
