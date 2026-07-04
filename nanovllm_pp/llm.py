@@ -2,10 +2,10 @@ from .engine.llm_engine import LLMEngine
 
 
 class LLM(LLMEngine):
-    """Thin user-facing facade over the engine.
+    """Public API for the inference engine.
 
-    Separating LLM from LLMEngine keeps the public API stable while
-    allowing the engine internals to evolve independently.
+    LLMEngine handles all runtime logic. LLM provides a stable
+    interface that can be versioned independently.
     """
 
     pass
