@@ -27,6 +27,8 @@ class LLMEngine:
         self.model_path = model_path
 
         engine_config = EngineConfig()
+        load_in_4bit = kwargs.pop("load_in_4bit", False)
+        load_in_8bit = kwargs.pop("load_in_8bit", False)
         for k, v in kwargs.items():
             if hasattr(engine_config, k):
                 setattr(engine_config, k, v)
@@ -41,11 +43,30 @@ class LLMEngine:
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+
+        model_kwargs = {"trust_remote_code": True}
+        if load_in_4bit and self.device == "cuda":
+            from transformers import BitsAndBytesConfig
+
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        elif load_in_8bit and self.device == "cuda":
+            from transformers import BitsAndBytesConfig
+
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
+        else:
+            model_kwargs["torch_dtype"] = torch_dtype
+
         self.model = (
             AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
+                **model_kwargs,
             )
             .to(self.device)
             .eval()
@@ -88,28 +109,30 @@ class LLMEngine:
 
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        text_cfg = getattr(hf_config, "text_config", hf_config)
+
         return ModelConfig(
             model_path=model_path,
-            num_layers=getattr(hf_config, "num_hidden_layers", 0),
+            num_layers=getattr(text_cfg, "num_hidden_layers", 0),
             num_kv_heads=getattr(
-                hf_config,
+                text_cfg,
                 "num_key_value_heads",
-                getattr(hf_config, "num_attention_heads", 0),
+                getattr(text_cfg, "num_attention_heads", 0),
             ),
-            num_attention_heads=hf_config.num_attention_heads,
+            num_attention_heads=text_cfg.num_attention_heads,
             head_dim=getattr(
-                hf_config,
+                text_cfg,
                 "head_dim",
-                hf_config.hidden_size // hf_config.num_attention_heads,
+                text_cfg.hidden_size // text_cfg.num_attention_heads,
             ),
-            hidden_size=hf_config.hidden_size,
+            hidden_size=text_cfg.hidden_size,
             intermediate_size=getattr(
-                hf_config, "intermediate_size", getattr(hf_config, "ffn_dim", 0)
+                text_cfg, "intermediate_size", getattr(text_cfg, "ffn_dim", 0)
             ),
-            vocab_size=hf_config.vocab_size,
+            vocab_size=text_cfg.vocab_size,
             dtype=str(self.model.dtype),
             tie_word_embeddings=getattr(hf_config, "tie_word_embeddings", False),
-            rope_theta=getattr(hf_config, "rope_theta", 10000.0),
+            rope_theta=getattr(text_cfg, "rope_theta", 10000.0),
         )
 
     def _estimate_kv_blocks(self) -> int:
