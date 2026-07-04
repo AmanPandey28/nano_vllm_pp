@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nano-vllm-pp"
+version = "0.1.0"
+description = "A minimal, readable LLM inference engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Aman Pandey" }]
+keywords = ["llm", "inference", "vllm", "paged-attention"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "accelerate>=0.20",
+]
+
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn", "pydantic"]
+
+[project.urls]
+Homepage = "https://github.com/AmanPandey28/nano_vllm_pp"
