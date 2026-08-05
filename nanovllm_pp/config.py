@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class EngineConfig:
+    device: str = "auto"
+    dtype: str = "auto"
     block_size: int = 256
     max_num_seqs: int = 256
     max_num_batched_tokens: int = 2048
@@ -22,6 +24,12 @@ class EngineConfig:
     spec_proposer_type: str = "ngram"
 
     def __post_init__(self):
+        if not isinstance(self.device, str) or not self.device.strip():
+            raise ValueError("device must be a non-empty string")
+        if self.dtype not in {"auto", "float32", "float16", "bfloat16"}:
+            raise ValueError(
+                "dtype must be one of: auto, float32, float16, bfloat16"
+            )
         if self.block_size <= 0:
             raise ValueError("block_size must be > 0")
         if self.max_num_seqs <= 0:

@@ -1,7 +1,7 @@
 """Tutorial: full NanoVLLM++ engine pipeline.
 
-Demonstrates prefill/decode, paged KV cache, continuous batching,
-sequence lifecycle, and block table management end-to-end.
+Demonstrates prefill/decode, iteration-level scheduling, sequence lifecycle,
+and logical block accounting end-to-end. The HF cache is not physically paged.
 """
 
 import sys
@@ -10,12 +10,14 @@ import time
 sys.path.insert(0, ".")
 
 from nanovllm_pp import LLM, SamplingParams
+from nanovllm_pp.device import resolve_device, synchronize
 
 if __name__ == "__main__":
     model_path = sys.argv[1] if len(sys.argv) > 1 else "facebook/opt-125m"
 
     print(f"Loading {model_path}...")
-    llm = LLM(model_path, enforce_eager=True)
+    device = resolve_device("cuda")
+    llm = LLM(model_path, enforce_eager=True, device=str(device))
 
     prompts = [
         "The capital of France is",
@@ -25,9 +27,11 @@ if __name__ == "__main__":
     sp = SamplingParams(temperature=0.7, max_tokens=24)
 
     print(f"Generating for {len(prompts)} prompts...")
-    start = time.time()
+    synchronize(device)
+    start = time.perf_counter()
     outputs = llm.generate(prompts, sp)
-    elapsed = time.time() - start
+    synchronize(device)
+    elapsed = time.perf_counter() - start
 
     for i, out in enumerate(outputs):
         print(f"\n--- Prompt {i} ---")

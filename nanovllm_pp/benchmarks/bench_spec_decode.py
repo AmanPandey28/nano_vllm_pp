@@ -6,6 +6,7 @@ use the same Hugging Face KV cache; this is not a comparison against an
 artificial full-recomputation baseline.
 """
 
+import statistics
 import sys
 import time
 
@@ -13,6 +14,12 @@ import torch
 
 sys.path.insert(0, ".")
 
+from nanovllm_pp.device import (
+    model_dtype_kwargs,
+    resolve_device,
+    resolve_dtype,
+    synchronize,
+)
 from nanovllm_pp.spec_decode.manager import SpecDecodeManager
 
 
@@ -20,16 +27,16 @@ class SpecBenchRunner:
     def __init__(self, model_path):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = str(resolve_device("cuda"))
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True
         )
-        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        dtype = resolve_dtype(torch.device(self.device), "auto")
         self.model = (
             AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=dtype,
                 trust_remote_code=True,
+                **model_dtype_kwargs(dtype),
             )
             .to(self.device)
             .eval()
@@ -61,8 +68,7 @@ class SpecBenchRunner:
         return seq
 
     def _synchronize(self):
-        if self.device == "cuda":
-            torch.cuda.synchronize()
+        synchronize(self.device)
 
     def run_standard(self, prompt, max_tokens):
         seq = self._sequence(prompt, max_tokens)
@@ -78,6 +84,7 @@ class SpecBenchRunner:
             "elapsed_s": round(elapsed, 3),
             "target_forwards": max_tokens,
             "tokens_generated": seq.num_generated_tokens,
+            "generated_token_ids": list(seq.generated_token_ids),
         }
 
     def run_spec_decode(self, prompt, max_tokens, max_spec=4):
@@ -100,6 +107,7 @@ class SpecBenchRunner:
             # One prefill forward plus the measured speculative decode passes.
             "target_forwards": 1 + manager.metrics.target_forwards,
             "empty_proposals": manager.metrics.proposals_empty,
+            "generated_token_ids": list(seq.generated_token_ids),
         }
 
 
@@ -116,8 +124,20 @@ if __name__ == "__main__":
     print(f"Max tokens: {max_tokens}\n")
 
     runner = SpecBenchRunner(model_path)
-    std = runner.run_standard(prompt, max_tokens)
-    spec = runner.run_spec_decode(prompt, max_tokens)
+    runner.run_standard("CUDA warm-up", 2)
+    standard_samples = []
+    speculative_samples = []
+    std = None
+    spec = None
+    for _ in range(3):
+        std = runner.run_standard(prompt, max_tokens)
+        spec = runner.run_spec_decode(prompt, max_tokens)
+        standard_samples.append(std["elapsed_s"])
+        speculative_samples.append(spec["elapsed_s"])
+        if spec["generated_token_ids"] != std["generated_token_ids"]:
+            raise RuntimeError("speculative decoding changed greedy output tokens")
+    std["elapsed_s"] = round(statistics.median(standard_samples), 3)
+    spec["elapsed_s"] = round(statistics.median(speculative_samples), 3)
 
     print(f"  {'Method':<20} {'Time(s)':<10} {'Fwds':<8} {'Accept':<8}")
     print(f"  {std['method']:<20} {std['elapsed_s']:<10} {std['target_forwards']:<8} —")
@@ -130,3 +150,6 @@ if __name__ == "__main__":
         f"Accepted: {spec['tokens_accepted']}, "
         f"Empty proposals: {spec['empty_proposals']}"
     )
+    print(f"  Cached samples (s): {standard_samples}")
+    print(f"  Spec samples (s):   {speculative_samples}")
+    print("  Greedy token parity: PASS")

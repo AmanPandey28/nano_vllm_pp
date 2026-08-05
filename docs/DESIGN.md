@@ -96,6 +96,12 @@ utilization target, with extra runtime headroom. The scheduler reserves these
 blocks before admission and decode. Speculation reserves its maximum upcoming
 positions conservatively.
 
+Device selection is explicit. `device="cuda"` fails when CUDA is hidden rather
+than silently benchmarking the CPU; `device="auto"` retains convenient CPU
+fallback for functional examples. Automatic CUDA dtype selection uses BF16
+when supported and FP16 otherwise. K/V capacity uses that compute/cache dtype,
+not the storage width of a quantized parameter.
+
 `BlockManager` stores IDs, refcounts, hashes, and token metadata only. No layer
 K/V tensor is indexed through `block_table`; actual tensors grow inside the HF
 cache. Therefore:
@@ -238,21 +244,30 @@ PyTorch Profiler, accelerator tools, or Nsight on a real deployment.
 
 ## 12. Verification
 
-The CPU-only deterministic suite covers configuration validation, sampling and
+The deterministic CPU suite covers configuration validation, sampling and
 seeds, block lifecycle/hash eviction, chunk cache carry-over, max-token
 completion, speculative rejection/full acceptance/EOS truncation, scheduler
 lookahead and rotation, INT4 odd-width packing, storage accounting, profiler
 math, and JSONL traces.
 
+CUDA-marked tests additionally execute the packed INT4 and INT8 teaching
+layers on the selected GPU and verify the device manifest. They skip when CUDA
+is not visible, while `python -m nanovllm_pp.benchmarks.gpu_smoke` is the
+fail-fast host/device check used before performance runs.
+
 ```bash
 ruff check nanovllm_pp tests
 pytest -q
+python -m nanovllm_pp.benchmarks.gpu_smoke
 ```
 
-Model/hardware qualification remains necessary: greedy token parity against
-Transformers, stochastic distribution tests, long-context/chunk parity,
-multiple cache implementations and Transformers versions, GPU memory stress,
-server load/tail latency, quantized accuracy, and benchmark reproducibility.
+The retained [RTX 5050 validation record](GPU_VALIDATION.md) covers one local
+Qwen3-0.6B environment: CUDA smoke, all 37 tests, greedy cache/engine parity,
+chunk parity, speculative parity, quantized storage/timing, and PyTorch CUDA
+profiling. Broader qualification remains necessary: stochastic distribution
+tests, long-context stress, multiple cache implementations and Transformers
+versions, server load/tail latency, task-level quantized accuracy, thermal/power
+control, and workload sweeps.
 
 ## 13. Production roadmap
 

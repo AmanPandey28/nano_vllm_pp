@@ -5,6 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..config import EngineConfig, ModelConfig
+from ..device import model_dtype_kwargs, resolve_device, resolve_dtype
 from ..engine.block_manager import BlockManager
 from ..engine.model_runner import ModelRunner
 from ..engine.scheduler import Scheduler
@@ -48,37 +49,38 @@ class LLMEngine:
 
         self.engine_config = engine_config
 
+        device = resolve_device(engine_config.device)
+        self.device = str(device)
+        self.compute_dtype = resolve_dtype(device, engine_config.dtype)
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
-
         model_kwargs = {"trust_remote_code": True}
-        if load_in_4bit and self.device == "cuda":
+        if load_in_4bit and device.type == "cuda":
             from transformers import BitsAndBytesConfig
 
             model_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=self.compute_dtype,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
             )
-            model_kwargs["device_map"] = {"": 0}
-        elif load_in_8bit and self.device == "cuda":
+            model_kwargs["device_map"] = {"": device.index}
+        elif load_in_8bit and device.type == "cuda":
             from transformers import BitsAndBytesConfig
 
             model_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_8bit=True,
             )
-            model_kwargs["device_map"] = {"": 0}
+            model_kwargs["device_map"] = {"": device.index}
         else:
-            model_kwargs["torch_dtype"] = torch_dtype
+            model_kwargs.update(model_dtype_kwargs(self.compute_dtype))
 
-        if (load_in_4bit or load_in_8bit) and self.device != "cuda":
+        if (load_in_4bit or load_in_8bit) and device.type != "cuda":
             raise RuntimeError(
                 "bitsandbytes 4/8-bit loading is supported only on CUDA in "
                 "this project; use the educational weight-only modules for CPU"
@@ -188,7 +190,7 @@ class LLMEngine:
         num_layers = self.model_config.num_layers
         num_kv_heads = self.model_config.num_kv_heads
         head_dim = self.model_config.head_dim
-        dtype_bytes = next(self.model.parameters()).element_size()
+        dtype_bytes = torch.empty((), dtype=self.compute_dtype).element_size()
 
         kv_per_token = 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
         kv_per_block = kv_per_token * block_size
@@ -198,11 +200,12 @@ class LLMEngine:
                 "to estimate KV capacity"
             )
 
-        if torch.cuda.is_available():
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
             target_headroom = (
                 total_bytes * self.engine_config.gpu_memory_utilization
-                - torch.cuda.memory_allocated()
+                - torch.cuda.memory_allocated(device)
             )
             # Keep headroom for activations, allocator fragmentation, and
             # non-PyTorch CUDA allocations. This remains an admission estimate;

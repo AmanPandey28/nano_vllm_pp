@@ -45,6 +45,27 @@ pip install -e ".[server]"
 pip install -e ".[quantization]"
 ```
 
+## CUDA access and fail-fast validation
+
+Performance runs should request CUDA explicitly. This prevents a restricted
+container or agent sandbox from silently running a GPU benchmark on the CPU:
+
+```bash
+nvidia-smi
+python -m nanovllm_pp.benchmarks.gpu_smoke
+```
+
+If `nvidia-smi` works in a normal terminal but the smoke command reports that
+CUDA is unavailable in an automation environment, that process does not have
+access to `/dev/nvidia*`. Run it with host GPU/device access; reinstalling
+PyTorch inside the isolated process will not expose a hidden device.
+
+The engine accepts `device="auto"`, `"cpu"`, `"cuda"`, or `"cuda:N"` and
+`dtype="auto"`, `"float32"`, `"float16"`, or `"bfloat16"`. CUDA benchmarks in
+this repository request `cuda` and fail clearly when it is not visible. On
+CUDA, automatic dtype selection prefers BF16 when the device supports it and
+otherwise uses FP16.
+
 Download or point to a local Hugging Face causal LM. Qwen3-0.6B is the model
 used in the design examples:
 
@@ -59,6 +80,8 @@ from nanovllm_pp import LLM, SamplingParams
 
 llm = LLM(
     "./Qwen3-0.6B",
+    device="cuda",
+    dtype="auto",
     enable_chunked_prefill=True,
     enable_spec_decode=True,
 )
@@ -82,7 +105,7 @@ then call `forget_request()` to release retained output state.
 from nanovllm_pp import LLM, SamplingParams
 from nanovllm_pp.server.app import start_server
 
-llm = LLM("./Qwen3-0.6B", enable_chunked_prefill=True)
+llm = LLM("./Qwen3-0.6B", device="cuda", enable_chunked_prefill=True)
 start_server(llm, SamplingParams, port=8000)
 ```
 
@@ -107,13 +130,15 @@ python nanovllm_pp/tutorials/03_engine_basic.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_baseline.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_chunked_prefill.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
 ```
 
-Benchmarks are workload examples, not checked-in performance claims. Record the
-model revision, hardware, software versions, warm-up, synchronization, request
-shape distribution, precision, and output correctness before comparing runs.
+Benchmarks warm the model and synchronize CUDA around timed regions, but they
+remain workload examples rather than universal performance claims. Record the
+model revision, hardware/power mode, software versions, sample distribution,
+request shapes, precision, and output correctness before comparing runs.
 
 ## Repository map
 
@@ -131,7 +156,9 @@ tests/                deterministic CPU tests with a tiny causal-model double
 ```
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture, implementation
-invariants, known limitations, and validation plan.
+invariants, known limitations, and validation plan. The exact RTX 5050
+environment, synchronized measurements, parity results, and caveats are in
+[docs/GPU_VALIDATION.md](docs/GPU_VALIDATION.md).
 
 ## License
 

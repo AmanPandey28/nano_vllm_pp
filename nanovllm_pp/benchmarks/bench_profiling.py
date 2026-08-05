@@ -14,6 +14,13 @@ sys.path.insert(0, ".")
 import torch
 
 from nanovllm_pp import LLM, SamplingParams
+from nanovllm_pp.device import (
+    cuda_device_info,
+    model_dtype_kwargs,
+    resolve_device,
+    resolve_dtype,
+    synchronize,
+)
 from nanovllm_pp.observability.profiler import diagnose_slowdown
 
 
@@ -31,7 +38,10 @@ def main():
     print("  LAYER 1+2: Engine & Request Profiling")
     print("=" * 60)
 
-    llm = LLM(model_path, enforce_eager=True)
+    device = resolve_device("cuda")
+    print(f"  CUDA environment: {cuda_device_info(device)}")
+    llm = LLM(model_path, enforce_eager=True, device=str(device))
+    llm.generate(["CUDA warm-up"], SamplingParams(temperature=0.0, max_tokens=2))
     llm.enable_profiling()
     sp = SamplingParams(temperature=0.0, max_tokens=12)
     llm.generate(prompts, sp)
@@ -58,20 +68,21 @@ def main():
     print("  LAYER 3: GPU Kernel Profiling (PyTorch Profiler)")
     print("=" * 60)
 
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        dtype = resolve_dtype(device, "auto")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = (
             AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
+                **model_dtype_kwargs(dtype),
             )
-            .cuda()
+            .to(device)
             .eval()
         )
-        ids = tokenizer.encode(prompts[0], return_tensors="pt").cuda()
+        ids = tokenizer.encode(prompts[0], return_tensors="pt").to(device)
 
         with torch.profiler.profile(
             activities=[
@@ -80,9 +91,12 @@ def main():
             ],
             record_shapes=True,
             with_stack=False,
+            acc_events=True,
         ) as prof, torch.no_grad():
             for _ in range(3):
                 _ = model(ids)
+
+        synchronize(device)
 
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     else:

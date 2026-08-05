@@ -9,19 +9,21 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from nanovllm_pp.device import model_dtype_kwargs, resolve_device, resolve_dtype
+
 
 class TinyLLM:
     def __init__(self, model_path: str, device: str = "cuda"):
-        self.device = device if torch.cuda.is_available() else "cpu"
+        self.device = str(resolve_device(device))
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True
         )
-        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        dtype = resolve_dtype(torch.device(self.device), "auto")
         self.model = (
             AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=dtype,
                 trust_remote_code=True,
+                **model_dtype_kwargs(dtype),
             )
             .to(self.device)
             .eval()
