@@ -8,23 +8,38 @@ class EngineConfig:
     max_num_batched_tokens: int = 2048
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.90
-    enforce_eager: bool = False
-    enable_prefix_caching: bool = True
+    enforce_eager: bool = True
+    # Prefix hashing exists in BlockManager, but the Hugging Face KV tensors are
+    # not stored in that block pool yet.  Keep the engine feature off rather
+    # than silently claiming compute reuse that does not happen.
+    enable_prefix_caching: bool = False
     enable_chunked_prefill: bool = False
     max_prefill_chunk_size: int = 512
     decode_priority: bool = True
-    reserve_full_prompt_blocks: bool = True
 
     enable_spec_decode: bool = False
     max_spec_tokens: int = 4
     spec_proposer_type: str = "ngram"
-    reserve_lookahead_slots: bool = True
 
     def __post_init__(self):
-        assert self.block_size > 0
-        assert self.max_num_seqs > 0
-        assert self.max_num_batched_tokens > 0
-        assert 0.0 < self.gpu_memory_utilization <= 1.0
+        if self.block_size <= 0:
+            raise ValueError("block_size must be > 0")
+        if self.max_num_seqs <= 0:
+            raise ValueError("max_num_seqs must be > 0")
+        if self.max_num_batched_tokens <= 0:
+            raise ValueError("max_num_batched_tokens must be > 0")
+        if self.max_model_len <= 0:
+            raise ValueError("max_model_len must be > 0")
+        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        if self.max_prefill_chunk_size <= 0:
+            raise ValueError("max_prefill_chunk_size must be > 0")
+        if self.max_spec_tokens <= 0:
+            raise ValueError("max_spec_tokens must be > 0")
+        if self.spec_proposer_type != "ngram":
+            raise ValueError("only the ngram speculative proposer is supported")
+        if self.enable_spec_decode and self.max_num_batched_tokens < 2:
+            raise ValueError("speculative decoding needs a token budget of at least 2")
 
 
 @dataclass

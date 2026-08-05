@@ -4,8 +4,8 @@ Compares enable_chunked_prefill=True vs False on the same batch to
 measure TTFT improvement when long prompts are split into chunks.
 """
 
-import time
 import sys
+import time
 
 sys.path.insert(0, ".")
 

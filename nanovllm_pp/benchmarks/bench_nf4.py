@@ -10,12 +10,12 @@ Measures GPU memory usage, inference speed, and output quality.
 
 import sys
 import time
+
 import torch
 
 sys.path.insert(0, ".")
 
 from nanovllm_pp import LLM, SamplingParams
-from nanovllm_pp.quantization.int8_weight_only import model_memory_report
 
 
 def measure_memory():
@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     try:
         results.append(run_int8(model_path, prompts, max_tokens))
-    except Exception as e:
+    except (ImportError, RuntimeError, ValueError) as e:
         print(f"\n  [INT8] Skipped: {e}")
 
     print(f"\n{'=' * 60}")
@@ -125,8 +125,8 @@ if __name__ == "__main__":
         pct = mem_saved / results[0]["gpu_gb"] * 100
         print(f"\n  NF4 saves {mem_saved:.1f} GB ({pct:.0f}%) vs FP16")
 
-    print(f"\n  bitsandbytes NF4 info:")
-    print(f"    - 4-bit NormalFloat quantization (information-theoretically optimal)")
-    print(f"    - Double quantization: quantizes the scale factors too")
-    print(f"    - Blocksize 64: each block has its own scale")
-    print(f"    - Compute dtype: bfloat16 (dequantized on the fly)")
+    print("\n  bitsandbytes NF4 info:")
+    print("    - 4-bit NormalFloat quantization (information-theoretically optimal)")
+    print("    - Double quantization: quantizes the scale factors too")
+    print("    - Blocksize 64: each block has its own scale")
+    print("    - Compute dtype: bfloat16 (dequantized on the fly)")

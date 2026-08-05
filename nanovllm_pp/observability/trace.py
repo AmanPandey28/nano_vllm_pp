@@ -1,6 +1,6 @@
-from dataclasses import dataclass, asdict
 import json
 import time
+from dataclasses import asdict, dataclass
 
 
 @dataclass
@@ -33,9 +33,8 @@ class EngineTrace:
         self.events.append(TraceEvent(**kwargs))
 
     def write_jsonl(self, path: str):
-        with open(path, "w") as f:
-            for e in self.events:
-                f.write(json.dumps(asdict(e), default=str) + "\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(asdict(e), default=str) + "\n" for e in self.events)
 
     def summary(self) -> dict:
         if not self.events:

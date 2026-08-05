@@ -30,19 +30,34 @@ def dequantize_int8(qweight: torch.Tensor, scale: torch.Tensor):
 
 def quantize_per_channel_int4(weight: torch.Tensor):
     """Quantize to 4-bit per-channel with packing (2 x int4 per byte)."""
-    qweight, scale = quantize_per_channel_int8(weight)
-    qweight_int4 = (qweight + 8).clamp(0, 15).to(torch.uint8)
-    packed = (qweight_int4[::2] & 0x0F) | ((qweight_int4[1::2] & 0x0F) << 4)
-    return packed, scale
+    max_abs = weight.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+    scale = max_abs / 7.0
+    qweight = torch.round(weight / scale).clamp(-8, 7).to(torch.int8)
+    unsigned = (qweight + 8).to(torch.uint8)
+    if unsigned.shape[1] % 2:
+        # Unsigned nibble value 8 represents quantized zero.
+        unsigned = torch.nn.functional.pad(unsigned, (0, 1), value=8)
+    low = unsigned[:, 0::2] & 0x0F
+    high = (unsigned[:, 1::2] & 0x0F) << 4
+    packed = low | high
+    return packed, scale.squeeze(1)
 
 
-def dequantize_int4(packed: torch.Tensor, scale: torch.Tensor):
+def dequantize_int4(
+    packed: torch.Tensor, scale: torch.Tensor, in_features: int | None = None
+):
     """Unpack 4-bit weights and dequantize."""
     low = (packed & 0x0F).float() - 8
     high = ((packed >> 4) & 0x0F).float() - 8
-    qweight = torch.empty((packed.shape[0] * 2, packed.shape[1]), dtype=torch.float32)
-    qweight[::2] = low
-    qweight[1::2] = high
+    qweight = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2),
+        dtype=torch.float32,
+        device=packed.device,
+    )
+    qweight[:, 0::2] = low
+    qweight[:, 1::2] = high
+    if in_features is not None:
+        qweight = qweight[:, :in_features]
     return qweight * scale[:, None]
 
 
@@ -59,12 +74,36 @@ class Int8WeightOnlyLinear(torch.nn.Module):
         self.register_buffer("qweight", qweight)
         self.register_buffer("scale", scale)
         if bias is not None:
-            self.register_buffer("bias", bias)
+            self.register_buffer("bias", bias.detach().clone())
         else:
             self.bias = None
 
     def forward(self, x):
         weight = dequantize_int8(self.qweight, self.scale).to(x.dtype)
+        out = x @ weight.T
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+
+class Int4WeightOnlyLinear(torch.nn.Module):
+    """Correct packed INT4 storage with naive dequantization on each forward."""
+
+    def __init__(self, fp_weight: torch.Tensor, bias=None):
+        super().__init__()
+        self.out_features, self.in_features = fp_weight.shape
+        packed, scale = quantize_per_channel_int4(fp_weight.float())
+        self.register_buffer("packed_weight", packed)
+        self.register_buffer("scale", scale)
+        if bias is not None:
+            self.register_buffer("bias", bias.detach().clone())
+        else:
+            self.bias = None
+
+    def forward(self, x):
+        weight = dequantize_int4(
+            self.packed_weight, self.scale, self.in_features
+        ).to(x.dtype)
         out = x @ weight.T
         if self.bias is not None:
             out = out + self.bias
@@ -99,23 +138,51 @@ def quantize_model_int8(model, exclude_keywords=("lm_head", "embed")):
     return quantized_count, skipped_count
 
 
+def quantize_model_int4(model, exclude_keywords=("lm_head", "embed")):
+    """Replace eligible ``nn.Linear`` modules with packed INT4 prototypes."""
+    quantized_count = 0
+    skipped_count = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if any(keyword in name for keyword in exclude_keywords):
+            skipped_count += 1
+            continue
+        quantized = Int4WeightOnlyLinear(module.weight.data, module.bias)
+        parent_name = ".".join(name.split(".")[:-1])
+        child_name = name.split(".")[-1]
+        parent = model if not parent_name else model.get_submodule(parent_name)
+        setattr(parent, child_name, quantized)
+        quantized_count += 1
+    return quantized_count, skipped_count
+
+
 def model_memory_report(model):
-    """Report memory usage estimates for FP16, INT8, and INT4.
-
-    Note: only counts named_parameters() (excludes buffers), so INT8/INT4
-    values represent remaining FP16 parameters after quantization.
-    """
-    stats = {"FP16": 0, "INT8": 0, "INT4": 0}
-    for name, param in model.named_parameters():
-        elements = param.numel()
-        stats["FP16"] += elements * 2
-        stats["INT8"] += elements * 1
-        stats["INT4"] += elements * 0.5
-
+    """Report actual parameter and buffer storage, deduplicating tied tensors."""
+    seen = set()
+    parameter_bytes = 0
+    buffer_bytes = 0
+    for tensor, kind in [
+        *((tensor, "parameter") for tensor in model.parameters()),
+        *((tensor, "buffer") for tensor in model.buffers()),
+    ]:
+        if tensor.device.type == "meta":
+            continue
+        ptr = tensor.data_ptr()
+        if ptr in seen:
+            continue
+        seen.add(ptr)
+        size = tensor.numel() * tensor.element_size()
+        if kind == "parameter":
+            parameter_bytes += size
+        else:
+            buffer_bytes += size
+    total = parameter_bytes + buffer_bytes
     return {
-        "fp16_mb": round(stats["FP16"] / (1024**2), 1),
-        "int8_mb": round(stats["INT8"] / (1024**2), 1),
-        "int4_mb": round(stats["INT4"] / (1024**2), 1),
-        "int8_vs_fp16": f"{stats['INT8'] / stats['FP16'] * 100:.0f}%",
-        "int4_vs_fp16": f"{stats['INT4'] / stats['FP16'] * 100:.0f}%",
+        "actual_bytes": total,
+        "parameter_bytes": parameter_bytes,
+        "buffer_bytes": buffer_bytes,
+        "actual_mb": round(total / (1024**2), 1),
+        "parameter_mb": round(parameter_bytes / (1024**2), 1),
+        "buffer_mb": round(buffer_bytes / (1024**2), 1),
     }

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 import torch
 
 
@@ -49,7 +50,8 @@ class GreedyVerifier:
     is compared against the proposal. Matching tokens are accepted; the
     first mismatch triggers rejection and the sequence stops there.
 
-    Returns (accepted_tokens, rejection_token).
+    Returns (matching_proposal_prefix, correction_token).  The correction is
+    deliberately not counted as an accepted draft token.
     """
 
     def verify(
@@ -62,7 +64,6 @@ class GreedyVerifier:
             if proposed == target_token:
                 accepted.append(proposed)
             else:
-                accepted.append(target_token)
                 rejection_token = target_token
                 break
         return accepted, rejection_token

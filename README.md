@@ -1,27 +1,54 @@
 # NanoVLLM++
 
-A minimal, readable LLM inference engine that implements the core ideas behind production systems like vLLM. Every component exists to teach a specific runtime concept.
+NanoVLLM++ is a small, readable LLM inference-runtime prototype. It is built to
+teach the control plane around a Hugging Face causal language model: request
+state, prefill/decode separation, iteration-level scheduling, KV-capacity
+accounting, chunked prefill, exact greedy n-gram speculation, sampling,
+observability, quantization prototypes, and an OpenAI-shaped HTTP API.
 
-## What it implements
+It is intentionally not a production vLLM replacement. In particular, the
+model runner executes scheduled requests one at a time, Hugging Face owns a
+dynamic per-request `past_key_values` cache, and `BlockManager` accounts for
+logical pages but does not store K/V tensors or drive an attention kernel.
+Prefix-cache execution is therefore rejected rather than silently pretending
+to reuse compute.
 
-| Component | Concept |
-|-----------|---------|
-| Prefill/decode separation | Why KV caches eliminate O(n²) recomputation |
-| Paged KV cache | Logical-to-physical block mapping, ref-counted sharing |
-| Prefix caching | Chained-hash block reuse for repeated prompts |
-| Continuous batching | Dynamic request admission and completion |
-| Chunked prefill | Token-budget scheduling, decode interleaving |
-| Speculative decoding | N-gram proposer + greedy verifier |
-| Weight-only quantization | Per-channel INT8/INT4 with memory benchmarks, NF4 via bitsandbytes |
-| OpenAI-compatible serving | FastAPI, SSE streaming, /metrics |
+## Feature truth table
 
-## Quickstart
+| Capability | Status | Important boundary |
+|---|---|---|
+| Prefill/decode KV reuse | Implemented | Per-request Hugging Face cache |
+| Chunked prefill | Implemented | Cache is carried across chunks; waiting prompts rotate fairly |
+| Iteration-level scheduling | Implemented | Work items are not fused into one tensor batch |
+| Logical block accounting | Implemented | Admission model only; no physical paged-attention pool |
+| Prefix hashing | Library prototype | Engine rejects `enable_prefix_caching=True` |
+| N-gram speculative decode | Implemented for greedy sampling | Exact target verification, rejection correction, bonus token, cache cropping |
+| Top-k/top-p/min-p/seed/logprobs/stops | Implemented | Speculation falls back to one-token steps for stop strings and stochastic sampling |
+| INT8/packed INT4 modules | Educational implementation | Dequantizes weights before matmul, so it saves storage but is not a fused speed kernel |
+| bitsandbytes NF4/INT8 | Optional CUDA path | Requires the `quantization` extra and CUDA |
+| FastAPI + SSE | Implemented, OpenAI-shaped | Not claimed as wire-compatible with every OpenAI field |
+| CUDA graphs / `torch.compile` | Not implemented | `enforce_eager=False` is rejected explicitly |
+| Tensor/pipeline parallelism | Not implemented | Single Python process and model instance |
+
+## Install and test
 
 ```bash
-pip install -e .
-# or: pip install -e ".[server]"  # for the HTTP API
+pip install -e ".[test]"
+pytest -q
+ruff check nanovllm_pp tests
+```
 
-# Download a model (Qwen3-0.6B recommended)
+Optional HTTP and bitsandbytes dependencies:
+
+```bash
+pip install -e ".[server]"
+pip install -e ".[quantization]"
+```
+
+Download or point to a local Hugging Face causal LM. Qwen3-0.6B is the model
+used in the design examples:
+
+```bash
 hf download Qwen/Qwen3-0.6B --local-dir ./Qwen3-0.6B
 ```
 
@@ -30,99 +57,81 @@ hf download Qwen/Qwen3-0.6B --local-dir ./Qwen3-0.6B
 ```python
 from nanovllm_pp import LLM, SamplingParams
 
-llm = LLM("./Qwen3-0.6B", enforce_eager=True)
+llm = LLM(
+    "./Qwen3-0.6B",
+    enable_chunked_prefill=True,
+    enable_spec_decode=True,
+)
+params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=5)
 
-params = SamplingParams(temperature=0.0, max_tokens=32)
 outputs = llm.generate(
     ["The capital of France is", "Machine learning is"],
     params,
 )
-
-for out in outputs:
-    print(out["generated_text"])
+for output in outputs:
+    print(output["generated_text"], output["finish_reason"])
 ```
 
-## Tutorials
-
-```bash
-# 01 — naive generation (O(n^2) baseline)
-python nanovllm_pp/tutorials/01_naive_generation.py ./Qwen3-0.6B
-
-# 02 — KV cache (prefill/decode)
-python nanovllm_pp/tutorials/02_kv_cache.py ./Qwen3-0.6B
-
-# 03 — full engine pipeline
-python nanovllm_pp/tutorials/03_engine_basic.py ./Qwen3-0.6B
-```
-
-## Benchmarks
-
-```bash
-python nanovllm_pp/benchmarks/bench_baseline.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_chunked_prefill.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
-```
+`generate()` is synchronous. For iteration-level admission, call
+`add_request()`, repeatedly call `step()`, read `get_output()` after completion,
+then call `forget_request()` to release retained output state.
 
 ## Serving
 
 ```python
-from nanovllm_pp.server.app import start_server
 from nanovllm_pp import LLM, SamplingParams
+from nanovllm_pp.server.app import start_server
 
-llm = LLM("./Qwen3-0.6B", enforce_eager=True)
+llm = LLM("./Qwen3-0.6B", enable_chunked_prefill=True)
 start_server(llm, SamplingParams, port=8000)
 ```
 
 ```bash
-# Test endpoints
 curl http://localhost:8000/health
-curl http://localhost:8000/metrics
-curl -X POST http://localhost:8000/v1/completions \
+curl -N -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3","prompt":"Hello","max_tokens":16,"temperature":0.0}'
+  -d '{"model":"qwen3","prompt":"Hello","max_tokens":16,"temperature":0,"stream":true}'
 ```
 
-## Quantized inference (NF4)
+The app uses an async lock around the non-thread-safe engine and yields between
+engine steps. Concurrent requests can therefore join later scheduler
+iterations; model calls themselves remain serialized.
 
-```python
-from nanovllm_pp import LLM, SamplingParams
+## Tutorials and benchmarks
 
-# Load with NF4 quantization — ~50% memory reduction
-llm = LLM("./Qwen3-0.6B", load_in_4bit=True)
+```bash
+python nanovllm_pp/tutorials/01_naive_generation.py ./Qwen3-0.6B
+python nanovllm_pp/tutorials/02_kv_cache.py ./Qwen3-0.6B
+python nanovllm_pp/tutorials/03_engine_basic.py ./Qwen3-0.6B
+
+python nanovllm_pp/benchmarks/bench_baseline.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_chunked_prefill.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
+python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
 ```
 
-```python
-from nanovllm_pp import LLM, SamplingParams
+Benchmarks are workload examples, not checked-in performance claims. Record the
+model revision, hardware, software versions, warm-up, synchronization, request
+shape distribution, precision, and output correctness before comparing runs.
 
-llm = LLM("./Qwen3-0.6B", enforce_eager=True)
-llm.enable_profiling()
+## Repository map
 
-outputs = llm.generate(["Hello world"], SamplingParams(max_tokens=12))
-llm.profile_report()
-# Prints per-phase timing breakdown (schedule/prefill/decode/postprocess)
-# and per-request latency percentiles (TTFT, TPOT, E2E)
-```
-
-## Structure
-
-```
+```text
 nanovllm_pp/
-├── engine/           Core runtime (sequence, block_manager, scheduler, runner, engine)
-├── scheduling/       Token budget, chunked prefill policies
-├── spec_decode/      N-gram proposer, verifier, speculation manager
-├── quantization/     INT8/INT4 per-channel weight quantization
-├── observability/    Engine profiler, request tracker, trace events
-├── server/           FastAPI OpenAI-compatible HTTP API
-├── benchmarks/       Baseline, chunked prefill, spec decode, quantization, profiling
-└── tutorials/        Naive generation, KV cache, full engine
+├── engine/           sequence, logical blocks, scheduler, model runner, engine
+├── scheduling/       token budget and mixed chunked-prefill policy
+├── spec_decode/      n-gram proposer, greedy verifier, integrated manager
+├── quantization/     per-channel INT8 and packed INT4 teaching modules
+├── observability/    phase/request metrics and JSONL tracing
+├── server/           FastAPI completion/chat/SSE surface
+├── benchmarks/       reproducible benchmark entry points
+└── tutorials/        three progressive executable examples
+tests/                deterministic CPU tests with a tiny causal-model double
 ```
 
-## Design doc
-
-See [docs/DESIGN.md](docs/DESIGN.md) for a detailed walkthrough of every component.
+See [docs/DESIGN.md](docs/DESIGN.md) for the architecture, implementation
+invariants, known limitations, and validation plan.
 
 ## License
 

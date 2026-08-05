@@ -1,4 +1,4 @@
-from .token_budget import TokenBudget, ScheduledItem
+from .token_budget import ScheduledItem, TokenBudget
 
 
 class MixedBatchScheduler:
@@ -40,16 +40,34 @@ class MixedBatchScheduler:
 
     def _schedule_decode(self, running, budget, items):
         for seq in list(running):
-            if not budget.can_fit(1):
-                break
-            if not self.block_manager.can_append(seq):
+            remaining = max(
+                1, seq.sampling_params.max_tokens - seq.num_generated_tokens
+            )
+            lookahead = 1
+            if (
+                self.config.enable_spec_decode
+                and seq.sampling_params.temperature == 0
+                and not seq.sampling_params.stop
+            ):
+                lookahead = min(1 + self.config.max_spec_tokens, remaining)
+            if not budget.can_fit(lookahead):
                 continue
-            self.block_manager.may_append(seq)
-            items.append(ScheduledItem(seq=seq, kind="decode", num_tokens=1))
-            budget.consume(1)
+            if not self.block_manager.can_append(seq, lookahead):
+                continue
+            self.block_manager.may_append(seq, lookahead)
+            items.append(
+                ScheduledItem(seq=seq, kind="decode", num_tokens=lookahead)
+            )
+            budget.consume(lookahead)
 
     def _schedule_prefill_chunks(self, waiting, budget, items):
-        while waiting and budget.remaining > 0:
+        # Consider every waiting sequence at most once per engine iteration.
+        # A partially-prefilled long request moves to the back, allowing short
+        # prompts to consume the remaining budget instead of being head-of-line
+        # blocked forever by the first deque entry.
+        for _ in range(len(waiting)):
+            if not waiting or budget.remaining <= 0:
+                break
             seq = waiting[0]
             remaining = seq.uncomputed_tokens
 
@@ -60,14 +78,16 @@ class MixedBatchScheduler:
             if self.config.enable_chunked_prefill:
                 if seq.num_computed_tokens == 0:
                     if not self.block_manager.can_allocate(seq):
-                        break
+                        waiting.rotate(-1)
+                        continue
                     self.block_manager.allocate(seq)
 
                 chunk = budget.prefill_chunk_size(remaining)
                 if chunk <= 0:
                     break
                 if not budget.can_fit(chunk):
-                    break
+                    waiting.rotate(-1)
+                    continue
 
                 items.append(ScheduledItem(seq=seq, kind="prefill", num_tokens=chunk))
                 budget.consume(chunk)
@@ -75,12 +95,14 @@ class MixedBatchScheduler:
                 if chunk >= remaining:
                     waiting.popleft()
                 else:
-                    break
+                    waiting.rotate(-1)
             else:
                 if not budget.can_fit(remaining):
-                    break
+                    waiting.rotate(-1)
+                    continue
                 if not self.block_manager.can_allocate(seq):
-                    break
+                    waiting.rotate(-1)
+                    continue
                 waiting.popleft()
                 self.block_manager.allocate(seq)
                 items.append(

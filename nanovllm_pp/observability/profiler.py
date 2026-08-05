@@ -1,5 +1,5 @@
+import math
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 
 
@@ -9,6 +9,7 @@ class StepMetrics:
     schedule_ms: float = 0.0
     prefill_ms: float = 0.0
     decode_ms: float = 0.0
+    mixed_ms: float = 0.0
     postprocess_ms: float = 0.0
     total_ms: float = 0.0
     num_prefill: int = 0
@@ -36,21 +37,23 @@ class EngineProfiler:
 
     def start_step(self, step: int):
         self._current = StepMetrics(step=step)
-        self._t0 = time.time()
+        self._t0 = time.perf_counter()
 
     def tick(self, phase: str):
         if self._current is None:
             return
-        elapsed = (time.time() - self._t0) * 1000
+        elapsed = (time.perf_counter() - self._t0) * 1000
         if phase == "schedule":
             self._current.schedule_ms = elapsed
         elif phase == "prefill":
             self._current.prefill_ms = elapsed
         elif phase == "decode":
             self._current.decode_ms = elapsed
+        elif phase == "mixed":
+            self._current.mixed_ms = elapsed
         elif phase == "postprocess":
             self._current.postprocess_ms = elapsed
-        self._t0 = time.time()
+        self._t0 = time.perf_counter()
 
     def end_step(
         self,
@@ -68,6 +71,7 @@ class EngineProfiler:
                 self._current.schedule_ms,
                 self._current.prefill_ms,
                 self._current.decode_ms,
+                self._current.mixed_ms,
                 self._current.postprocess_ms,
             ]
         )
@@ -90,6 +94,7 @@ class EngineProfiler:
             "avg_schedule_ms": round(mean(h.schedule_ms for h in self.history), 3),
             "avg_prefill_ms": round(mean(h.prefill_ms for h in self.history), 3),
             "avg_decode_ms": round(mean(h.decode_ms for h in self.history), 3),
+            "avg_mixed_ms": round(mean(h.mixed_ms for h in self.history), 3),
             "avg_postprocess_ms": round(
                 mean(h.postprocess_ms for h in self.history), 3
             ),
@@ -102,6 +107,7 @@ class EngineProfiler:
             "schedule": sum(h.schedule_ms for h in self.history),
             "prefill": sum(h.prefill_ms for h in self.history),
             "decode": sum(h.decode_ms for h in self.history),
+            "mixed": sum(h.mixed_ms for h in self.history),
             "postprocess": sum(h.postprocess_ms for h in self.history),
         }
         return max(parts, key=parts.get)
@@ -113,6 +119,7 @@ class EngineProfiler:
                 "schedule": round(h.schedule_ms, 3),
                 "prefill": round(h.prefill_ms, 3),
                 "decode": round(h.decode_ms, 3),
+                "mixed": round(h.mixed_ms, 3),
                 "post": round(h.postprocess_ms, 3),
                 "total": round(h.total_ms, 3),
                 "waiting_q": h.waiting_queue,
@@ -133,6 +140,7 @@ class EngineProfiler:
             ("Schedule", "avg_schedule_ms"),
             ("Prefill", "avg_prefill_ms"),
             ("Decode", "avg_decode_ms"),
+            ("Mixed", "avg_mixed_ms"),
             ("Postprocess", "avg_postprocess_ms"),
         ]:
             val = s[attr]
@@ -156,7 +164,7 @@ class RequestTracker:
 
     def record_enqueue(self, request_id: str):
         self.requests[request_id] = {
-            "enqueue_t": time.time(),
+            "enqueue_t": time.perf_counter(),
             "first_token_t": None,
             "completion_t": None,
             "tokens_generated": 0,
@@ -167,24 +175,28 @@ class RequestTracker:
             request_id in self.requests
             and self.requests[request_id]["first_token_t"] is None
         ):
-            self.requests[request_id]["first_token_t"] = time.time()
+            self.requests[request_id]["first_token_t"] = time.perf_counter()
 
     def record_completion(self, request_id: str, num_tokens: int = 0):
         if request_id in self.requests:
             r = self.requests[request_id]
-            r["completion_t"] = time.time()
+            r["completion_t"] = time.perf_counter()
             if num_tokens > 0:
                 r["tokens_generated"] = num_tokens
 
     def report(self) -> dict:
         ttft_vals, tpot_vals, e2e_vals = [], [], []
-        for rid, r in self.requests.items():
+        for r in self.requests.values():
             if r["first_token_t"]:
                 ttft_vals.append((r["first_token_t"] - r["enqueue_t"]) * 1000)
-            if r["completion_t"] and r["first_token_t"]:
+            if (
+                r["completion_t"]
+                and r["first_token_t"]
+                and r["tokens_generated"] > 1
+            ):
                 gen_time = (r["completion_t"] - r["first_token_t"]) * 1000
-                tokens = max(r["tokens_generated"], 1)
-                tpot_vals.append(gen_time / tokens)
+                intervals = r["tokens_generated"] - 1
+                tpot_vals.append(gen_time / intervals)
             if r["completion_t"]:
                 e2e_vals.append((r["completion_t"] - r["enqueue_t"]) * 1000)
 
@@ -194,9 +206,9 @@ class RequestTracker:
             vals = sorted(vals)
             n = len(vals)
             return {
-                "p50": round(vals[n // 2], 1),
-                "p95": round(vals[int(n * 0.95)], 1),
-                "p99": round(vals[int(n * 0.99)], 1),
+                "p50": round(vals[max(0, math.ceil(n * 0.50) - 1)], 1),
+                "p95": round(vals[max(0, math.ceil(n * 0.95) - 1)], 1),
+                "p99": round(vals[max(0, math.ceil(n * 0.99) - 1)], 1),
                 "mean": round(sum(vals) / n, 1),
             }
 

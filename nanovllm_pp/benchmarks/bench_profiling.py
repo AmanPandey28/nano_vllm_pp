@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, ".")
 
 import torch
+
 from nanovllm_pp import LLM, SamplingParams
 from nanovllm_pp.observability.profiler import diagnose_slowdown
 
@@ -79,10 +80,9 @@ def main():
             ],
             record_shapes=True,
             with_stack=False,
-        ) as prof:
-            with torch.no_grad():
-                for _ in range(3):
-                    _ = model(ids)
+        ) as prof, torch.no_grad():
+            for _ in range(3):
+                _ = model(ids)
 
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     else:

@@ -1,11 +1,14 @@
-"""Benchmark: n-gram speculative decoding vs standard greedy decode.
+"""Benchmark: n-gram speculative decoding vs cached greedy decode.
 
 Uses a repetitive prompt to maximize n-gram match rate and measures
-acceptance rate, target forwards saved, and wall-clock speedup.
+acceptance rate, target forwards saved, and wall-clock speedup. Both paths
+use the same Hugging Face KV cache; this is not a comparison against an
+artificial full-recomputation baseline.
 """
 
-import time
 import sys
+import time
+
 import torch
 
 sys.path.insert(0, ".")
@@ -32,8 +35,8 @@ class SpecBenchRunner:
             .eval()
         )
 
+        from nanovllm_pp.config import EngineConfig, ModelConfig
         from nanovllm_pp.engine.model_runner import ModelRunner
-        from nanovllm_pp.config import ModelConfig, EngineConfig
 
         cfg = ModelConfig(
             vocab_size=self.model.config.vocab_size,
@@ -47,51 +50,55 @@ class SpecBenchRunner:
         ec = EngineConfig()
         self.model_runner = ModelRunner(self.model, cfg, ec, device=self.device)
 
-    def run_standard(self, prompt, max_tokens):
-        ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-        start = time.time()
-        for _ in range(max_tokens):
-            with torch.no_grad():
-                out = self.model(ids)
-                logits = out.logits[:, -1, :]
-            next_id = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat([ids, next_id], dim=1)
-        elapsed = time.time() - start
-        return {
-            "method": "standard",
-            "elapsed_s": round(elapsed, 3),
-            "target_forwards": max_tokens,
-            "tokens_generated": max_tokens,
-        }
-
-    def run_spec_decode(self, prompt, max_tokens, max_spec=4):
+    def _sequence(self, prompt, max_tokens):
         from nanovllm_pp.engine.sequence import Sequence
         from nanovllm_pp.sampling_params import SamplingParams
 
         ids = self.tokenizer.encode(prompt, add_special_tokens=True)
-        sp = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        seq = Sequence(ids, sp)
-        seq.num_computed_tokens = len(ids)
+        params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        seq = Sequence(ids, params)
+        seq.eos_token_id = self.tokenizer.eos_token_id
+        return seq
 
+    def _synchronize(self):
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+
+    def run_standard(self, prompt, max_tokens):
+        seq = self._sequence(prompt, max_tokens)
+        self._synchronize()
+        start = time.perf_counter()
+        self.model_runner.run_prefill(seq, seq.prompt_len)
+        while seq.num_generated_tokens < max_tokens:
+            self.model_runner.run_decode(seq)
+        self._synchronize()
+        elapsed = time.perf_counter() - start
+        return {
+            "method": "cached_greedy",
+            "elapsed_s": round(elapsed, 3),
+            "target_forwards": max_tokens,
+            "tokens_generated": seq.num_generated_tokens,
+        }
+
+    def run_spec_decode(self, prompt, max_tokens, max_spec=4):
+        seq = self._sequence(prompt, max_tokens)
         manager = SpecDecodeManager(self.model_runner, max_spec_tokens=max_spec)
-        start = time.time()
-        generated = 0
-        while generated < max_tokens:
-            n = manager.step(seq)
-            if n <= 0:
-                break
-            generated += n
-            if generated >= max_tokens:
-                break
-        elapsed = time.time() - start
+        self._synchronize()
+        start = time.perf_counter()
+        self.model_runner.run_prefill(seq, seq.prompt_len)
+        while seq.num_generated_tokens < max_tokens:
+            manager.step(seq)
+        self._synchronize()
+        elapsed = time.perf_counter() - start
         return {
             "method": "spec_decode",
             "elapsed_s": round(elapsed, 3),
-            "tokens_generated": generated,
+            "tokens_generated": seq.num_generated_tokens,
             "acceptance_rate": manager.metrics.acceptance_rate,
             "tokens_proposed": manager.metrics.tokens_proposed,
             "tokens_accepted": manager.metrics.tokens_accepted,
-            "target_forwards": manager.metrics.target_forwards,
+            # One prefill forward plus the measured speculative decode passes.
+            "target_forwards": 1 + manager.metrics.target_forwards,
             "empty_proposals": manager.metrics.proposals_empty,
         }
 

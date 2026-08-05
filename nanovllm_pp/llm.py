@@ -7,5 +7,3 @@ class LLM(LLMEngine):
     LLMEngine handles all runtime logic. LLM provides a stable
     interface that can be versioned independently.
     """
-
-    pass

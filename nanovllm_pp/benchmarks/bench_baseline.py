@@ -4,8 +4,9 @@ Compares three implementations on identical prompts to measure the
 speedup from KV caching and scheduling overhead.
 """
 
-import time
 import sys
+import time
+
 import torch
 
 sys.path.insert(0, ".")

@@ -1,5 +1,6 @@
-import math
+import hashlib
 import json
+import math
 
 
 def compute_block_hash(parent_hash, block_tokens):
@@ -8,11 +9,15 @@ def compute_block_hash(parent_hash, block_tokens):
     When two sequences share a token prefix, their corresponding blocks
     produce identical hashes, enabling prefix-aware KV cache reuse.
     """
-    return hash((parent_hash, tuple(block_tokens)))
+    digest = hashlib.sha256()
+    digest.update((parent_hash or "ROOT").encode("ascii"))
+    for token_id in block_tokens:
+        digest.update(int(token_id).to_bytes(8, byteorder="little", signed=True))
+    return digest.hexdigest()
 
 
 class Block:
-    """A KV cache page — a fixed-size chunk of per-layer key-value memory.
+    """Logical page metadata for a fixed-size chunk of token positions.
 
     Reference counting tracks how many sequences share this block.
     When ref_count reaches zero, the block returns to the free pool.
@@ -29,22 +34,26 @@ class Block:
 
 
 class BlockManager:
-    """Paged KV cache memory manager.
+    """Logical page allocator and admission-control model.
 
     Manages a pool of fixed-size KV cache blocks. Provides:
       - Logical-to-physical address translation via per-sequence block tables.
       - Reference counting for safe block sharing.
       - Chained hashing for prefix cache detection.
-      - Copy-on-write semantics when a cached block is partially reused.
 
-    Memory is allocated as a pool of `num_blocks` blocks, each holding
-    `block_size` tokens. The allocator maintains free/used sets and a
-    hash-to-block mapping for prefix cache lookups.
+    Important: these objects contain token metadata, not K/V tensors. The
+    executable model path stores K/V in each sequence's Hugging Face cache.
+    Consequently prefix sharing is disabled at the engine boundary until a
+    physical paged-attention backend is integrated. This allocator still makes
+    capacity, lifecycle, lookahead, and block-table behavior inspectable.
     """
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(
+        self, num_blocks: int, block_size: int, enable_prefix_caching: bool = False
+    ):
         self.num_blocks = num_blocks
         self.block_size = block_size
+        self.enable_prefix_caching = enable_prefix_caching
 
         self.blocks = [Block(i) for i in range(num_blocks)]
         self.free_block_ids = set(range(num_blocks))
@@ -54,13 +63,13 @@ class BlockManager:
     def required_blocks(self, num_tokens: int) -> int:
         return math.ceil(num_tokens / self.block_size)
 
-    def can_allocate(self, seq, num_new_tokens: int = None) -> bool:
+    def can_allocate(self, seq, num_new_tokens: int | None = None) -> bool:
         tokens = seq.prompt_len if num_new_tokens is None else num_new_tokens
         need = self.required_blocks(tokens)
         return len(self.free_block_ids) >= need
 
-    def can_append(self, seq) -> bool:
-        need = self.required_blocks(len(seq.token_ids))
+    def can_append(self, seq, num_new_tokens: int = 1) -> bool:
+        need = self.required_blocks(len(seq.token_ids) + max(0, num_new_tokens))
         have = len(seq.block_table)
         if need <= have:
             return True
@@ -72,7 +81,14 @@ class BlockManager:
         block_id = self.free_block_ids.pop()
         self.used_block_ids.add(block_id)
         block = self.blocks[block_id]
+        # A zero-ref cached block is eligible for reuse.  Evict its old hash
+        # before overwriting it so hash_to_block_id can never point at unrelated
+        # contents.
+        if block.hash is not None and self.hash_to_block_id.get(block.hash) == block_id:
+            del self.hash_to_block_id[block.hash]
         block.ref_count = 1
+        block.hash = None
+        block.token_ids = []
         return block_id
 
     def allocate(self, seq):
@@ -95,7 +111,11 @@ class BlockManager:
             )
             block_hash = compute_block_hash(parent_hash, block_tokens)
 
-            cached_block_id = self.hash_to_block_id.get(block_hash)
+            cached_block_id = (
+                self.hash_to_block_id.get(block_hash)
+                if self.enable_prefix_caching
+                else None
+            )
             if cached_block_id is not None:
                 cached_block = self.blocks[cached_block_id]
                 if cached_block.ref_count == 0:
@@ -111,7 +131,8 @@ class BlockManager:
                 fresh_block = self.blocks[fresh_id]
                 fresh_block.hash = block_hash
                 fresh_block.token_ids = list(block_tokens)
-                self.hash_to_block_id[block_hash] = fresh_id
+                if self.enable_prefix_caching:
+                    self.hash_to_block_id[block_hash] = fresh_id
                 seq.block_table.append(fresh_id)
 
         remaining = len(prompt_tokens) % self.block_size
@@ -123,13 +144,13 @@ class BlockManager:
             )
             seq.block_table.append(fresh_id)
 
-    def may_append(self, seq) -> bool:
-        """Ensure the sequence has a physical block for its next generated token.
+    def may_append(self, seq, num_new_tokens: int = 1) -> bool:
+        """Reserve logical blocks for upcoming generated token positions.
 
         Returns True if allocation succeeded or was not needed.
         """
-        needed = self.required_blocks(len(seq.token_ids))
-        if needed > len(seq.block_table):
+        needed = self.required_blocks(len(seq.token_ids) + max(0, num_new_tokens))
+        while needed > len(seq.block_table):
             if not self.free_block_ids:
                 return False
             fresh_id = self.allocate_fresh_block()

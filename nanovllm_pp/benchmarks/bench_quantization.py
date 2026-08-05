@@ -4,15 +4,16 @@ Compares FP16 baseline with per-channel INT8 on the same model.
 Measures weight memory reduction and inference time.
 """
 
-import time
 import sys
+import time
+
 import torch
 
 sys.path.insert(0, ".")
 
 from nanovllm_pp.quantization.int8_weight_only import (
-    quantize_model_int8,
     model_memory_report,
+    quantize_model_int8,
 )
 
 
@@ -59,18 +60,13 @@ if __name__ == "__main__":
     int8_mem = model_memory_report(model)
     int8_result = run_inference(model, tokenizer, prompt, max_tokens, device)
 
-    print(f"\n  Memory:")
-    print(f"    FP16 params: {fp16_mem['fp16_mb']:.1f} MB")
-    print(
-        f"    INT8 params: {int8_mem['int8_mb']:.1f} MB "
-        f"({int8_mem['int8_vs_fp16']} of FP16)"
-    )
-    print(
-        f"    INT4 estimate: {int8_mem['int4_mb']:.1f} MB "
-        f"({int8_mem['int4_vs_fp16']} of FP16)"
-    )
+    print("\n  Actual model storage (parameters + buffers):")
+    print(f"    FP16: {fp16_mem['actual_mb']:.1f} MB")
+    print(f"    INT8: {int8_mem['actual_mb']:.1f} MB")
+    pct = 100 * int8_mem["actual_mb"] / max(fp16_mem["actual_mb"], 1e-9)
+    print(f"    INT8 / FP16: {pct:.1f}%")
     print(f"    Layers quantized: {n_quant}, skipped: {n_skip}")
-    print(f"\n  Inference:")
+    print("\n  Inference:")
     print(f"    FP16: {fp16_result['elapsed_s']}s")
     print(f"    INT8: {int8_result['elapsed_s']}s")
     print(f"    FP16 output: {fp16_result['generated']}")

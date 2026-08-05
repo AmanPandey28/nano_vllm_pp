@@ -4,8 +4,8 @@ Demonstrates why naive decoding is inefficient: each step recomputes the
 full accumulated sequence, resulting in O(n^2) total compute.
 """
 
-import time
 import sys
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 

@@ -111,14 +111,58 @@ class Scheduler:
 
     def _schedule_decode_only(self):
         scheduled = []
+        token_budget = self.config.max_num_batched_tokens
         for seq in list(self.running):
             if len(scheduled) >= self.config.max_num_seqs:
                 break
-            if not self.block_manager.can_append(seq):
+            lookahead = self._decode_lookahead(seq)
+            if lookahead > token_budget:
                 continue
-            self.block_manager.may_append(seq)
-            scheduled.append(ScheduledItem(seq=seq, kind="decode", num_tokens=1))
+            if not self.block_manager.can_append(seq, lookahead):
+                continue
+            self.block_manager.may_append(seq, lookahead)
+            scheduled.append(
+                ScheduledItem(seq=seq, kind="decode", num_tokens=lookahead)
+            )
+            token_budget -= lookahead
         return ScheduledBatch(scheduled)
+
+    def _decode_lookahead(self, seq):
+        remaining = max(
+            1, seq.sampling_params.max_tokens - seq.num_generated_tokens
+        )
+        if (
+            self.config.enable_spec_decode
+            and seq.sampling_params.temperature == 0
+            and not seq.sampling_params.stop
+        ):
+            return min(1 + self.config.max_spec_tokens, remaining)
+        return 1
+
+    @staticmethod
+    def _finish_reason(seq):
+        if seq.stop_matched is not None:
+            return "stop"
+        if seq.last_token in (seq.sampling_params.stop_token_ids or []):
+            return "stop"
+        if (
+            not seq.sampling_params.ignore_eos
+            and seq.eos_token_id is not None
+            and seq.last_token == seq.eos_token_id
+        ):
+            return "stop"
+        if seq.num_generated_tokens >= seq.sampling_params.max_tokens:
+            return "length"
+        return None
+
+    def _finish(self, seq, reason):
+        seq.status = SequenceStatus.FINISHED
+        seq.finish_reason = reason
+        self.block_manager.deallocate(seq)
+        if seq in self.running:
+            self.running.remove(seq)
+        if hasattr(seq, "_kv_cache"):
+            del seq._kv_cache
 
     def postprocess(self, scheduled_batch, output_tokens):
         """Update sequence state after model execution.
@@ -136,22 +180,19 @@ class Scheduler:
             if item.kind == "prefill":
                 seq.num_computed_tokens += item.num_tokens
                 if seq.num_computed_tokens >= seq.prompt_len:
-                    if seq.status == SequenceStatus.WAITING:
-                        seq.status = SequenceStatus.RUNNING
-                    self.running.append(seq)
+                    reason = self._finish_reason(seq)
+                    if reason is not None:
+                        self._finish(seq, reason)
+                        finished.append(seq)
+                    else:
+                        if seq.status == SequenceStatus.WAITING:
+                            seq.status = SequenceStatus.RUNNING
+                        self.running.append(seq)
 
             elif item.kind == "decode":
-                done = False
-                if seq.num_generated_tokens >= seq.sampling_params.max_tokens:
-                    done = True
-                elif not seq.sampling_params.ignore_eos and seq.last_token == getattr(
-                    seq.sampling_params, "eos_token_id", -1
-                ):
-                    done = True
-                if done:
-                    seq.status = SequenceStatus.FINISHED
-                    self.block_manager.deallocate(seq)
-                    self.running.remove(seq)
+                reason = self._finish_reason(seq)
+                if reason is not None:
+                    self._finish(seq, reason)
                     finished.append(seq)
 
         return finished

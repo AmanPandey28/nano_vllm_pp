@@ -4,13 +4,12 @@ Demonstrates prefill/decode, paged KV cache, continuous batching,
 sequence lifecycle, and block table management end-to-end.
 """
 
-import time
 import sys
+import time
 
 sys.path.insert(0, ".")
 
 from nanovllm_pp import LLM, SamplingParams
-
 
 if __name__ == "__main__":
     model_path = sys.argv[1] if len(sys.argv) > 1 else "facebook/opt-125m"

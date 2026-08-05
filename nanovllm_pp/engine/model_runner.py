@@ -34,18 +34,43 @@ class Sampler:
         logits[indices_to_remove] = float("-inf")
         return logits
 
-    def __call__(self, logits, params):
-        logits = self.apply_temperature(logits, params.temperature)
+    def apply_min_p(self, logits, min_p):
+        if min_p <= 0.0:
+            return logits
+        probs = torch.softmax(logits, dim=-1)
+        threshold = probs.max(dim=-1, keepdim=True).values * min_p
+        logits[probs < threshold] = float("-inf")
+        return logits
+
+    def __call__(self, logits, params, generator=None):
+        # Filtering is in-place, so never mutate the model-owned output view.
+        raw_logits = logits.float()
+        sampling_logits = raw_logits.clone()
+        sampling_logits = self.apply_temperature(sampling_logits, params.temperature)
         if params.top_k:
-            logits = self.apply_top_k(logits, params.top_k)
+            sampling_logits = self.apply_top_k(sampling_logits, params.top_k)
         if params.top_p < 1.0:
-            logits = self.apply_top_p(logits, params.top_p)
+            sampling_logits = self.apply_top_p(sampling_logits, params.top_p)
+        if params.min_p > 0.0:
+            sampling_logits = self.apply_min_p(sampling_logits, params.min_p)
         if params.temperature == 0:
-            token_id = int(torch.argmax(logits, dim=-1).item())
+            token_id = int(torch.argmax(sampling_logits, dim=-1).item())
         else:
-            probs = torch.softmax(logits, dim=-1)
-            token_id = int(torch.multinomial(probs, num_samples=1).item())
-        return token_id, logits
+            probs = torch.softmax(sampling_logits, dim=-1)
+            token_id = int(
+                torch.multinomial(probs, num_samples=1, generator=generator).item()
+            )
+
+        raw_logprobs = torch.log_softmax(raw_logits, dim=-1)
+        info = {"logprob": float(raw_logprobs[token_id].item())}
+        if params.logprobs:
+            count = min(params.logprobs, raw_logprobs.numel())
+            values, indices = torch.topk(raw_logprobs, count)
+            info["top_logprobs"] = {
+                int(idx): float(value)
+                for idx, value in zip(indices.tolist(), values.tolist())
+            }
+        return token_id, info
 
 
 class ModelRunner:
@@ -79,6 +104,26 @@ class ModelRunner:
         self.kv_values = None
         self.sampler = Sampler(model_config.vocab_size)
         self.cuda_graphs = {}
+        self.spec_decode_manager = None
+
+    def _get_generator(self, seq):
+        if seq.sampling_params.seed is None:
+            return None
+        generator = getattr(seq, "_sampling_generator", None)
+        if generator is None:
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(seq.sampling_params.seed)
+            seq._sampling_generator = generator
+        return generator
+
+    def _sample_and_append(self, seq, logits):
+        token_id, info = self.sampler(
+            logits, seq.sampling_params, generator=self._get_generator(seq)
+        )
+        seq.append_token(
+            token_id, logprob=info if seq.sampling_params.logprobs else None
+        )
+        return token_id
 
     def run_prefill(self, seq, num_tokens):
         """Process `num_tokens` tokens of the prompt.
@@ -88,22 +133,30 @@ class ModelRunner:
         subsequent decode steps.
         """
         start = seq.num_computed_tokens
-        end = min(start + num_tokens, len(seq.token_ids))
+        end = min(start + num_tokens, seq.prompt_len)
         token_slice = seq.token_ids[start:end]
+        if not token_slice:
+            raise RuntimeError("prefill scheduled with no uncomputed prompt tokens")
         input_ids = torch.tensor(
             token_slice, dtype=torch.long, device=self.device
         ).unsqueeze(0)
-        with torch.no_grad():
-            output = self.model(input_ids, use_cache=True)
+        past = getattr(seq, "_kv_cache", None)
+        with torch.inference_mode():
+            if past is None:
+                output = self.model(input_ids, use_cache=True)
+            else:
+                # Carry cache state across chunks.  Omitting this argument would
+                # make every chunk a new sequence and silently corrupt outputs.
+                output = self.model(
+                    input_ids, past_key_values=past, use_cache=True
+                )
             last_logits = output.logits[:, -1, :]
             past = output.past_key_values
 
         seq._kv_cache = past
 
         if end >= seq.prompt_len:
-            token_id, _ = self.sampler(last_logits[0], seq.sampling_params)
-            seq.append_token(token_id)
-            return token_id
+            return self._sample_and_append(seq, last_logits[0])
         return None
 
     def run_decode(self, seq):
@@ -116,16 +169,14 @@ class ModelRunner:
         input_ids = torch.tensor(
             [[seq.last_token]], dtype=torch.long, device=self.device
         )
-        with torch.no_grad():
+        with torch.inference_mode():
             if past is not None:
                 output = self.model(input_ids, past_key_values=past, use_cache=True)
                 seq._kv_cache = output.past_key_values
             else:
                 output = self.model(input_ids, use_cache=False)
             logits = output.logits[:, -1, :]
-        token_id, _ = self.sampler(logits[0], seq.sampling_params)
-        seq.append_token(token_id)
-        return token_id
+        return self._sample_and_append(seq, logits[0])
 
     def run(self, scheduled_batch):
         """Execute a batch of ScheduledItems.
@@ -136,7 +187,14 @@ class ModelRunner:
         for item in scheduled_batch.items:
             seq = item.seq
             if item.kind == "decode":
-                token_id = self.run_decode(seq)
+                if (
+                    self.spec_decode_manager is not None
+                    and seq.sampling_params.temperature == 0
+                ):
+                    emitted = self.spec_decode_manager.step(seq)
+                    token_id = emitted[-1]
+                else:
+                    token_id = self.run_decode(seq)
                 results.append((seq, token_id))
             elif item.kind == "prefill":
                 token_id = self.run_prefill(seq, item.num_tokens)

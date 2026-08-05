@@ -1,17 +1,15 @@
-"""OpenAI-compatible serving layer for the inference engine.
+"""Small OpenAI-style FastAPI surface for the educational engine.
 
-Wraps the engine in a FastAPI application with:
-  POST /v1/completions       — text completions (streaming via SSE)
-  POST /v1/chat/completions  — chat completions (prompt template)
-  GET /health                 — engine readiness
-  GET /metrics                — KV block usage, queue depths
+The app factory keeps engine state in closures instead of module globals.  A
+single asyncio lock protects the non-thread-safe scheduler/model runner, while
+each request yields between engine steps so concurrent clients can be admitted
+to the same scheduler iteration.
 """
 
 import asyncio
 import json
 import time
 import uuid
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -25,9 +23,11 @@ class CompletionRequest(BaseModel):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
+    min_p: float = 0.0
     stop: str | list[str] | None = None
     stream: bool = False
     logprobs: int | None = None
+    seed: int | None = None
 
 
 class ChatMessage(BaseModel):
@@ -41,13 +41,16 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 64
     temperature: float = 1.0
     top_p: float = 1.0
+    stop: str | list[str] | None = None
     stream: bool = False
+    seed: int | None = None
 
 
 class Choice(BaseModel):
     index: int
     text: str
-    finish_reason: str | None = "stop"
+    finish_reason: str | None = None
+    logprobs: list | None = None
 
 
 class CompletionResponse(BaseModel):
@@ -56,146 +59,205 @@ class CompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[Choice]
+    usage: dict[str, int]
 
 
-app = FastAPI()
-engine = None
-sampling_params_cls = None
+# Kept for ``from nanovllm_pp.server.app import app`` compatibility.  The
+# configured application is returned by create_app/start_server.
+app = FastAPI(title="NanoVLLM++ (unconfigured)")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
+def create_app(engine, SamplingParams):
+    api = FastAPI(title="NanoVLLM++")
+    step_lock = asyncio.Lock()
 
-
-def create_app(engine_instance, SamplingParams):
-    global engine, sampling_params_cls
-    engine = engine_instance
-    sampling_params_cls = SamplingParams
-    app.router.lifespan_context = lifespan
-    return app
-
-
-@app.get("/health")
-def health():
-    if engine is None:
-        raise HTTPException(503, "Engine not initialized")
-    return {"status": "ok", "device": engine.device}
-
-
-@app.get("/metrics")
-def metrics():
-    if engine is None:
-        raise HTTPException(503, "Engine not initialized")
-    s = engine.scheduler.debug_state()
-    return {
-        "waiting_requests": s["waiting"],
-        "running_requests": s["running"],
-        "free_kv_blocks": s["blocks"]["free_blocks"],
-        "used_kv_blocks": s["blocks"]["used_blocks"],
-        "total_kv_blocks": s["blocks"]["total_blocks"],
-        "engine_steps": engine.step_counter,
-    }
-
-
-@app.post("/v1/completions")
-def completions(req: CompletionRequest):
-    if engine is None:
-        raise HTTPException(503, "Engine not initialized")
-
-    params = sampling_params_cls(
-        temperature=req.temperature,
-        max_tokens=req.max_tokens,
-        top_p=req.top_p,
-        top_k=req.top_k,
-        stop=req.stop,
-        logprobs=req.logprobs,
-    )
-
-    if req.stream:
-        return StreamingResponse(
-            _stream_completions(req, params),
-            media_type="text/event-stream",
+    def make_params(req):
+        return SamplingParams(
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            top_p=req.top_p,
+            top_k=getattr(req, "top_k", 0),
+            min_p=getattr(req, "min_p", 0.0),
+            stop=req.stop,
+            logprobs=getattr(req, "logprobs", None),
+            seed=req.seed,
         )
 
-    prompts = req.prompt if isinstance(req.prompt, list) else [req.prompt]
-    outputs = engine.generate(prompts, params)
+    async def add_requests(prompts, params):
+        try:
+            async with step_lock:
+                return [engine.add_request(prompt, params) for prompt in prompts]
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
-    choices = [
-        Choice(index=i, text=out["generated_text"]) for i, out in enumerate(outputs)
-    ]
+    async def step_once():
+        try:
+            async with step_lock:
+                return await asyncio.to_thread(engine.step)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return CompletionResponse(
-        id=request_id,
-        created=int(time.time()),
-        model=req.model,
-        choices=choices,
-    ).model_dump()
+    async def all_finished(request_ids):
+        async with step_lock:
+            return all(engine.is_request_finished(rid) for rid in request_ids)
 
+    async def snapshot_outputs(request_ids, *, forget=False):
+        async with step_lock:
+            outputs = [engine.get_output(rid) for rid in request_ids]
+            if forget:
+                for rid in request_ids:
+                    engine.forget_request(rid)
+            return outputs
 
-async def _stream_completions(req: CompletionRequest, params):
-    request_id = engine.add_request(req.prompt, params)
+    async def drive(request_ids):
+        while not await all_finished(request_ids):
+            await step_once()
+            await asyncio.sleep(0)
+        return await snapshot_outputs(request_ids, forget=True)
 
-    last_len = 0
-    while engine.scheduler.has_unfinished():
-        batch_finished = engine.step()
+    @api.get("/health")
+    async def health():
+        return {"status": "ok", "device": engine.device}
 
-        for seq in batch_finished:
-            if seq.request_id == request_id:
-                prompt_text = (
-                    req.prompt if isinstance(req.prompt, str) else req.prompt[0]
+    @api.get("/metrics")
+    async def metrics():
+        async with step_lock:
+            state = engine.scheduler.debug_state()
+        return {
+            "waiting_requests": state["waiting"],
+            "running_requests": state["running"],
+            "free_logical_blocks": state["blocks"]["free_blocks"],
+            "used_logical_blocks": state["blocks"]["used_blocks"],
+            "total_logical_blocks": state["blocks"]["total_blocks"],
+            "engine_steps": engine.step_counter,
+        }
+
+    @api.post("/v1/completions")
+    async def completions(req: CompletionRequest):
+        if req.stream and not isinstance(req.prompt, str):
+            raise HTTPException(400, "streaming accepts one prompt per request")
+        try:
+            params = make_params(req)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if req.stream:
+            return StreamingResponse(
+                stream_completion(req, params), media_type="text/event-stream"
+            )
+
+        prompts = req.prompt if isinstance(req.prompt, list) else [req.prompt]
+        request_ids = await add_requests(prompts, params)
+        outputs = await drive(request_ids)
+        choices = [
+            Choice(
+                index=index,
+                text=output["generated_text"],
+                finish_reason=output["finish_reason"],
+                logprobs=output["logprobs"] if req.logprobs else None,
+            )
+            for index, output in enumerate(outputs)
+        ]
+        usage = {
+            "prompt_tokens": sum(o["num_prompt_tokens"] for o in outputs),
+            "completion_tokens": sum(o["num_completion_tokens"] for o in outputs),
+        }
+        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        return CompletionResponse(
+            id=f"cmpl-{uuid.uuid4().hex[:12]}",
+            created=int(time.time()),
+            model=req.model,
+            choices=choices,
+            usage=usage,
+        ).model_dump()
+
+    async def stream_completion(req: CompletionRequest, params):
+        request_id = (await add_requests([req.prompt], params))[0]
+        previous = ""
+        while not await all_finished([request_id]):
+            await step_once()
+            output = (await snapshot_outputs([request_id]))[0]
+            current = output["generated_text"]
+            if current.startswith(previous):
+                delta = current[len(previous) :]
+            else:
+                # Decoding cleanup can very occasionally rewrite whitespace.
+                # Sending the current snapshot is safer than silently dropping it.
+                delta = current
+            if delta:
+                previous = current
+                chunk = {
+                    "id": request_id,
+                    "object": "text_completion.chunk",
+                    "created": int(time.time()),
+                    "model": req.model,
+                    "choices": [
+                        {"index": 0, "text": delta, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            await asyncio.sleep(0)
+
+        output = (await snapshot_outputs([request_id], forget=True))[0]
+        final_chunk = {
+            "id": request_id,
+            "object": "text_completion.chunk",
+            "created": int(time.time()),
+            "model": req.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "",
+                    "finish_reason": output["finish_reason"],
+                }
+            ],
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    def format_chat(messages):
+        values = [message.model_dump() for message in messages]
+        if hasattr(engine.tokenizer, "apply_chat_template"):
+            try:
+                return engine.tokenizer.apply_chat_template(
+                    values, tokenize=False, add_generation_prompt=True
                 )
-                prompt_len = len(
-                    engine.tokenizer.encode(prompt_text, add_special_tokens=True)
-                )
-                gen_text = engine.tokenizer.decode(
-                    seq.token_ids[prompt_len:], skip_special_tokens=True
-                )
-                new_text = gen_text[last_len:]
-                if new_text:
-                    last_len = len(gen_text)
-                    chunk = {
-                        "id": request_id,
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": req.model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "text": new_text,
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+            except (ValueError, TypeError):
+                pass
+        return "\n".join(
+            f"<|{message.role}|>\n{message.content}" for message in messages
+        ) + "\n<|assistant|>\n"
 
-        await asyncio.sleep(0)
+    @api.post("/v1/chat/completions")
+    async def chat_completions(req: ChatCompletionRequest):
+        completion_request = CompletionRequest(
+            model=req.model,
+            prompt=format_chat(req.messages),
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            stop=req.stop,
+            stream=req.stream,
+            seed=req.seed,
+        )
+        response = await completions(completion_request)
+        # Streaming already uses the standard SSE response.  For non-streaming,
+        # reshape text choices to the OpenAI chat message form.
+        if isinstance(response, StreamingResponse):
+            return response
+        response["object"] = "chat.completion"
+        for choice in response["choices"]:
+            choice["message"] = {
+                "role": "assistant",
+                "content": choice.pop("text"),
+            }
+        return response
 
-    yield "data: [DONE]\n\n"
-
-
-@app.post("/v1/chat/completions")
-def chat_completions(req: ChatCompletionRequest):
-    if engine is None:
-        raise HTTPException(503, "Engine not initialized")
-
-    texts = [f"<|{msg.role}|>\n{msg.content}" for msg in req.messages]
-    prompt = "\n".join(texts) + "\n<|assistant|>\n"
-
-    comp_req = CompletionRequest(
-        model=req.model,
-        prompt=prompt,
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-        top_p=req.top_p,
-        stream=req.stream,
-    )
-    return completions(comp_req)
+    return api
 
 
 def start_server(engine_instance, SamplingParams, host="0.0.0.0", port=8000):
     import uvicorn
 
-    create_app(engine_instance, SamplingParams)
-    uvicorn.run(app, host=host, port=port)
+    configured_app = create_app(engine_instance, SamplingParams)
+    uvicorn.run(configured_app, host=host, port=port)
