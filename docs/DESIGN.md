@@ -51,7 +51,9 @@ Important counters:
 - `num_computed_tokens` counts prompt tokens processed by prefill.
 - `num_generated_tokens` counts tokens appended after the prompt.
 - `generated_token_ids == token_ids[prompt_len:]`.
-- `block_table` contains reserved logical page IDs.
+- `block_table[logical_block]` contains the corresponding reserved physical
+  page ID. `BlockManager.slot_mapping()` translates token positions to flat
+  page slots for control-plane validation.
 - `_kv_cache` is the actual per-request Hugging Face cache while active.
 
 Completion is checked immediately after the prefill produces the first output
@@ -92,9 +94,10 @@ For element width `b`, decoder layers `L`, K/V heads `Hkv`, and head dimension
 
 The factor two is key plus value. `LLMEngine` estimates how many fixed-size
 logical blocks fit under current CUDA free memory and the configured
-utilization target, with extra runtime headroom. The scheduler reserves these
-blocks before admission and decode. Speculation reserves its maximum upcoming
-positions conservatively.
+utilization target, with extra runtime headroom. Prompt admission includes one
+extra position because the final prefill call emits the first generated token.
+Decode and speculation reserve their maximum upcoming positions
+conservatively.
 
 Device selection is explicit. `device="cuda"` fails when CUDA is hidden rather
 than silently benchmarking the CPU; `device="auto"` retains convenient CPU
@@ -102,18 +105,22 @@ fallback for functional examples. Automatic CUDA dtype selection uses BF16
 when supported and FP16 otherwise. K/V capacity uses that compute/cache dtype,
 not the storage width of a quantized parameter.
 
-`BlockManager` stores IDs, refcounts, hashes, and token metadata only. No layer
-K/V tensor is indexed through `block_table`; actual tensors grow inside the HF
-cache. Therefore:
+`BlockManager` stores IDs, refcounts, hashes, and token metadata only. It
+implements logical-position to physical-page translation and flat slot
+mapping, and the runner records generated token metadata after sampling. No
+layer K/V tensor is indexed through those slots; actual tensors grow inside
+the HF cache. Therefore:
 
-- logical capacity and lifecycle behavior are implemented;
-- physical non-contiguous paging and an attention slot mapping are not;
+- logical capacity, lifecycle, block-table translation, and slot metadata are
+  implemented;
+- physical non-contiguous tensor paging and a device slot mapping consumed by
+  attention are not;
 - prefix hashes are testable as a library concept, but engine-level prefix
   caching is rejected because metadata reuse without tensor reuse is false.
 
-A production implementation would preallocate per-layer K/V pools, assign
-physical blocks, create slot/block mappings for each batch, write new K/V into
-those slots, and make attention gather through the block table.
+A production implementation would preallocate per-layer K/V pools, copy the
+Python mappings into batch/device metadata, write new K/V into those slots,
+and make attention gather through the block table.
 
 ## 6. Scheduler and chunked prefill
 
@@ -245,7 +252,8 @@ PyTorch Profiler, accelerator tools, or Nsight on a real deployment.
 ## 12. Verification
 
 The deterministic CPU suite covers configuration validation, sampling and
-seeds, block lifecycle/hash eviction, chunk cache carry-over, max-token
+seeds, block lifecycle/hash eviction, block-table translation, generated-token
+slot metadata, exact-boundary admission, chunk cache carry-over, max-token
 completion, speculative rejection/full acceptance/EOS truncation, scheduler
 lookahead and rotation, INT4 odd-width packing, storage accounting, profiler
 math, and JSONL traces.
@@ -262,7 +270,7 @@ python -m nanovllm_pp.benchmarks.gpu_smoke
 ```
 
 The retained [RTX 5050 validation record](GPU_VALIDATION.md) covers one local
-Qwen3-0.6B environment: CUDA smoke, all 37 tests, greedy cache/engine parity,
+Qwen3-0.6B environment: CUDA smoke, all 41 tests, greedy cache/engine parity,
 chunk parity, speculative parity, quantized storage/timing, and PyTorch CUDA
 profiling. Broader qualification remains necessary: stochastic distribution
 tests, long-context stress, multiple cache implementations and Transformers

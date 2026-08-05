@@ -178,5 +178,8 @@ class SpecDecodeManager:
                 token_id,
                 logprob=self._token_logprob(logits[i], token_id, top_n),
             )
+            block_manager = self.model_runner.block_manager
+            if block_manager is not None and seq.block_table:
+                block_manager.record_token(seq, token_id)
         self.metrics.tokens_emitted += len(emitted)
         return emitted

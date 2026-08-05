@@ -43,3 +43,46 @@ def test_reused_free_block_evicts_stale_hash_mapping():
     second = make_sequence([9])
     manager.allocate(second)
     assert old_hash not in manager.hash_to_block_id
+
+
+def test_block_table_translates_positions_to_physical_slots():
+    manager = BlockManager(num_blocks=6, block_size=2)
+    seq = make_sequence([10, 11, 12])
+    manager.allocate(seq, num_new_tokens=2)
+
+    expected = [
+        seq.block_table[0] * 2,
+        seq.block_table[0] * 2 + 1,
+        seq.block_table[1] * 2,
+        seq.block_table[1] * 2 + 1,
+        seq.block_table[2] * 2,
+    ]
+    assert manager.slot_mapping(seq, range(5)) == expected
+
+
+def test_generated_tokens_fill_reserved_block_metadata():
+    manager = BlockManager(num_blocks=4, block_size=2)
+    seq = make_sequence([10, 11])
+    manager.allocate(seq, num_new_tokens=2)
+
+    seq.append_token(12)
+    manager.record_token(seq, 12)
+    seq.append_token(13)
+    manager.record_token(seq, 13)
+
+    generated_block = manager.blocks[seq.block_table[1]]
+    assert generated_block.token_ids == [12, 13]
+    assert generated_block.hash is not None
+
+
+def test_prompt_boundary_reserves_first_generated_token_slot():
+    manager = BlockManager(num_blocks=2, block_size=2)
+    seq = make_sequence([1, 2])
+
+    assert manager.can_allocate(seq, num_new_tokens=1)
+    manager.allocate(seq, num_new_tokens=1)
+    assert len(seq.block_table) == 2
+
+    seq.append_token(3)
+    manager.record_token(seq, 3)
+    assert manager.slot_mapping(seq, [2]) == [seq.block_table[1] * 2]

@@ -42,9 +42,16 @@ and synchronizes timed regions because CUDA execution is asynchronous.
 | `model.safetensors` SHA-256 | `f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b` |
 
 The smoke test completed a 1024-by-1024 BF16 matrix multiplication on
-`cuda:0`. The host-visible test suite ran all 37 tests, including CUDA INT8/INT4
-execution tests. In the restricted process, 35 passed and the two CUDA tests
-skipped as designed.
+`cuda:0`. After the block-table correctness revision, the host-visible test
+suite ran all 41 tests, including CUDA INT8/INT4 execution tests. In the
+restricted process, 39 passed and the two CUDA tests skipped as designed.
+
+The post-revision Qwen3 engine tutorial also completed on `cuda:0`: three
+prompts generated 24 tokens each in 24 engine steps. After termination the
+scheduler reported empty waiting/running queues and all 188 blocks returned to
+the free pool. That run validates the integrated block-table metadata and
+reclamation path; its sampled 1.53 s latency is not treated as a benchmark
+distribution.
 
 ## Observed synchronized results
 

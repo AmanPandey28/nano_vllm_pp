@@ -94,11 +94,13 @@ class Scheduler:
             remaining = seq.uncomputed_tokens
             if remaining > budget:
                 break
-            if not self.block_manager.can_allocate(seq):
+            # The final prefill forward emits the first generated token, so its
+            # logical cache slot must be admitted together with the prompt.
+            if not self.block_manager.can_allocate(seq, num_new_tokens=1):
                 break
             self.waiting.popleft()
             try:
-                self.block_manager.allocate(seq)
+                self.block_manager.allocate(seq, num_new_tokens=1)
             except RuntimeError:
                 break
             seq.status = SequenceStatus.RUNNING

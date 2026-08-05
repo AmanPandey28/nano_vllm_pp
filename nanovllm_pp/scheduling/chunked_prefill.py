@@ -77,10 +77,10 @@ class MixedBatchScheduler:
 
             if self.config.enable_chunked_prefill:
                 if seq.num_computed_tokens == 0:
-                    if not self.block_manager.can_allocate(seq):
+                    if not self.block_manager.can_allocate(seq, num_new_tokens=1):
                         waiting.rotate(-1)
                         continue
-                    self.block_manager.allocate(seq)
+                    self.block_manager.allocate(seq, num_new_tokens=1)
 
                 chunk = budget.prefill_chunk_size(remaining)
                 if chunk <= 0:
@@ -100,11 +100,11 @@ class MixedBatchScheduler:
                 if not budget.can_fit(remaining):
                     waiting.rotate(-1)
                     continue
-                if not self.block_manager.can_allocate(seq):
+                if not self.block_manager.can_allocate(seq, num_new_tokens=1):
                     waiting.rotate(-1)
                     continue
                 waiting.popleft()
-                self.block_manager.allocate(seq)
+                self.block_manager.allocate(seq, num_new_tokens=1)
                 items.append(
                     ScheduledItem(seq=seq, kind="prefill", num_tokens=remaining)
                 )

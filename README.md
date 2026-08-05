@@ -20,7 +20,7 @@ to reuse compute.
 | Prefill/decode KV reuse | Implemented | Per-request Hugging Face cache |
 | Chunked prefill | Implemented | Cache is carried across chunks; waiting prompts rotate fairly |
 | Iteration-level scheduling | Implemented | Work items are not fused into one tensor batch |
-| Logical block accounting | Implemented | Admission model only; no physical paged-attention pool |
+| Logical block table/accounting | Implemented | Address translation and slot metadata; no physical paged-attention pool |
 | Prefix hashing | Library prototype | Engine rejects `enable_prefix_caching=True` |
 | N-gram speculative decode | Implemented for greedy sampling | Exact target verification, rejection correction, bonus token, cache cropping |
 | Top-k/top-p/min-p/seed/logprobs/stops | Implemented | Speculation falls back to one-token steps for stop strings and stochastic sampling |

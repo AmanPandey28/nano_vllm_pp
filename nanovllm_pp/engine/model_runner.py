@@ -123,6 +123,8 @@ class ModelRunner:
         seq.append_token(
             token_id, logprob=info if seq.sampling_params.logprobs else None
         )
+        if self.block_manager is not None and seq.block_table:
+            self.block_manager.record_token(seq, token_id)
         return token_id
 
     def run_prefill(self, seq, num_tokens):

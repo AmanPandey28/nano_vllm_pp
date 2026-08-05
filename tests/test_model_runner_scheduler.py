@@ -50,6 +50,28 @@ def test_prefill_finishes_request_when_max_tokens_is_one():
     assert blocks.num_free_blocks == blocks.num_blocks
 
 
+def test_prefill_output_updates_reserved_block_table_slot():
+    config = tiny_engine_config()
+    blocks = BlockManager(num_blocks=4, block_size=2)
+    scheduler = Scheduler(config, blocks)
+    runner = ModelRunner(
+        TinyCacheModel(),
+        tiny_model_config(),
+        config,
+        device="cpu",
+        block_manager=blocks,
+    )
+    seq = Sequence([1, 2], SamplingParams(temperature=0, max_tokens=2))
+    scheduler.add(seq)
+
+    batch = scheduler.schedule()
+    runner.run(batch)
+
+    assert len(seq.block_table) == 2
+    assert blocks.blocks[seq.block_table[1]].token_ids == [3]
+    assert blocks.slot_mapping(seq, [2]) == [seq.block_table[1] * 2]
+
+
 def test_decode_reserves_speculative_lookahead_blocks():
     config = tiny_engine_config(enable_spec_decode=True, max_spec_tokens=3)
     blocks = BlockManager(num_blocks=8, block_size=2)
