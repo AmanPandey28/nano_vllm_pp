@@ -55,9 +55,7 @@ class MixedBatchScheduler:
             if not self.block_manager.can_append(seq, lookahead):
                 continue
             self.block_manager.may_append(seq, lookahead)
-            items.append(
-                ScheduledItem(seq=seq, kind="decode", num_tokens=lookahead)
-            )
+            items.append(ScheduledItem(seq=seq, kind="decode", num_tokens=lookahead))
             budget.consume(lookahead)
 
     def _schedule_prefill_chunks(self, waiting, budget, items):
@@ -69,18 +67,25 @@ class MixedBatchScheduler:
             if not waiting or budget.remaining <= 0:
                 break
             seq = waiting[0]
-            remaining = seq.uncomputed_tokens
+            if seq.block_table:
+                remaining = seq.uncomputed_tokens
+            else:
+                remaining = seq.prompt_len - self.block_manager.cached_prefix_tokens(
+                    seq
+                )
 
             if remaining <= 0:
                 waiting.popleft()
                 continue
 
             if self.config.enable_chunked_prefill:
-                if seq.num_computed_tokens == 0:
+                if not seq.block_table:
                     if not self.block_manager.can_allocate(seq, num_new_tokens=1):
                         waiting.rotate(-1)
                         continue
                     self.block_manager.allocate(seq, num_new_tokens=1)
+                    seq.num_computed_tokens = seq.num_cached_tokens
+                    remaining = seq.uncomputed_tokens
 
                 chunk = budget.prefill_chunk_size(remaining)
                 if chunk <= 0:
@@ -105,6 +110,8 @@ class MixedBatchScheduler:
                     continue
                 waiting.popleft()
                 self.block_manager.allocate(seq, num_new_tokens=1)
+                seq.num_computed_tokens = seq.num_cached_tokens
+                remaining = seq.uncomputed_tokens
                 items.append(
                     ScheduledItem(seq=seq, kind="prefill", num_tokens=remaining)
                 )

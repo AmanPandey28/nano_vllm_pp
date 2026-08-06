@@ -28,24 +28,30 @@ class Block:
         self.ref_count = 0
         self.hash = None
         self.token_ids = []
+        # Token metadata can be known before the model has produced K/V for
+        # those positions (for example, immediately after prompt admission).
+        # Prefix reuse is safe only when the entire physical page is valid.
+        self.computed_tokens = 0
 
     def __repr__(self):
-        return f"Block(id={self.block_id}, refs={self.ref_count}, hash={self.hash})"
+        return (
+            f"Block(id={self.block_id}, refs={self.ref_count}, "
+            f"computed={self.computed_tokens}, hash={self.hash})"
+        )
 
 
 class BlockManager:
-    """Logical page allocator and admission-control model.
+    """Physical-page allocator and admission-control model.
 
     Manages a pool of fixed-size KV cache blocks. Provides:
       - Logical-to-physical address translation via per-sequence block tables.
       - Reference counting for safe block sharing.
       - Chained hashing for prefix cache detection.
 
-    Important: these objects contain token metadata, not K/V tensors. The
-    executable model path stores K/V in each sequence's Hugging Face cache.
-    Consequently prefix sharing is disabled at the engine boundary until a
-    physical paged-attention backend is integrated. This allocator still makes
-    capacity, lifecycle, lookahead, and block-table behavior inspectable.
+    The manager owns page *metadata* while the paged model runner owns the K/V
+    tensors indexed by these page IDs. ``computed_tokens`` is the contract
+    between them: a hash is published for reuse only after the corresponding
+    physical K/V page has been fully written.
     """
 
     def __init__(
@@ -72,7 +78,14 @@ class BlockManager:
         """
         tokens = seq.prompt_len + max(0, num_new_tokens)
         need = self.required_blocks(tokens)
-        return len(self.free_block_ids) >= need
+        reusable = self._reusable_prefix_block_ids(seq)
+        # A zero-reference cached page is in the free set, so claiming it still
+        # consumes one free page. Only an already-active shared page reduces
+        # the number of free pages required by this admission.
+        active_shared = sum(
+            self.blocks[block_id].ref_count > 0 for block_id in reusable
+        )
+        return len(self.free_block_ids) >= need - active_shared
 
     def can_append(self, seq, num_new_tokens: int = 1) -> bool:
         need = self.required_blocks(len(seq.token_ids) + max(0, num_new_tokens))
@@ -95,7 +108,47 @@ class BlockManager:
         block.ref_count = 1
         block.hash = None
         block.token_ids = []
+        block.computed_tokens = 0
         return block_id
+
+    def _reusable_prefix_block_ids(self, seq) -> list[int]:
+        """Return the longest physically valid full-block prompt prefix.
+
+        The final logical prompt block is deliberately not reused when the
+        prompt ends exactly at a block boundary. At least one prompt token must
+        run through the model so the engine obtains logits for the first output
+        token without storing per-prefix logits in the cache.
+        """
+        if not self.enable_prefix_caching:
+            return []
+
+        prompt_tokens = seq.token_ids[: seq.prompt_len]
+        full_blocks = len(prompt_tokens) // self.block_size
+        prompt_blocks = self.required_blocks(len(prompt_tokens))
+        max_reusable = min(full_blocks, max(0, prompt_blocks - 1))
+        reusable = []
+        parent_hash = None
+        for logical_block in range(max_reusable):
+            start = logical_block * self.block_size
+            block_tokens = prompt_tokens[start : start + self.block_size]
+            block_hash = compute_block_hash(parent_hash, block_tokens)
+            block_id = self.hash_to_block_id.get(block_hash)
+            if block_id is None:
+                break
+            block = self.blocks[block_id]
+            if (
+                block.hash != block_hash
+                or block.token_ids != list(block_tokens)
+                or block.computed_tokens != self.block_size
+            ):
+                break
+            reusable.append(block_id)
+            parent_hash = block_hash
+        return reusable
+
+    def cached_prefix_tokens(self, seq) -> int:
+        """Number of prompt tokens that can skip model computation now."""
+        return len(self._reusable_prefix_block_ids(seq)) * self.block_size
 
     def allocate(self, seq, num_new_tokens: int = 0):
         """Allocate blocks for an entire prompt.
@@ -105,56 +158,39 @@ class BlockManager:
         shared. Otherwise a fresh block is allocated and its hash is
         registered for future reuse.
         """
+        if seq.block_table:
+            raise RuntimeError("cannot allocate an already-allocated sequence")
+        if not self.can_allocate(seq, num_new_tokens):
+            raise RuntimeError("Out of KV cache blocks while admitting prompt.")
+
         prompt_tokens = seq.token_ids[: seq.prompt_len]
-        num_full_blocks = len(prompt_tokens) // self.block_size
+        reusable = self._reusable_prefix_block_ids(seq)
 
-        for i in range(num_full_blocks):
-            block_tokens = prompt_tokens[
-                i * self.block_size : (i + 1) * self.block_size
-            ]
-            parent_hash = (
-                self.blocks[seq.block_table[-1]].hash if seq.block_table else None
-            )
-            block_hash = compute_block_hash(parent_hash, block_tokens)
+        # Claim reusable pages before fresh allocation. Otherwise a free cached
+        # page could be selected and evicted by allocate_fresh_block first.
+        for block_id in reusable:
+            block = self.blocks[block_id]
+            if block.ref_count == 0:
+                self.free_block_ids.remove(block_id)
+                self.used_block_ids.add(block_id)
+            block.ref_count += 1
+            seq.block_table.append(block_id)
 
-            cached_block_id = (
-                self.hash_to_block_id.get(block_hash)
-                if self.enable_prefix_caching
-                else None
-            )
-            if cached_block_id is not None:
-                cached_block = self.blocks[cached_block_id]
-                if cached_block.ref_count == 0:
-                    cached_block.ref_count = 1
-                    self.free_block_ids.discard(cached_block_id)
-                    self.used_block_ids.add(cached_block_id)
-                else:
-                    cached_block.ref_count += 1
-                seq.block_table.append(cached_block_id)
-                seq.num_cached_tokens += self.block_size
-            else:
-                fresh_id = self.allocate_fresh_block()
-                fresh_block = self.blocks[fresh_id]
-                fresh_block.hash = block_hash
-                fresh_block.token_ids = list(block_tokens)
-                if self.enable_prefix_caching:
-                    self.hash_to_block_id[block_hash] = fresh_id
-                seq.block_table.append(fresh_id)
-
-        remaining = len(prompt_tokens) % self.block_size
-        if remaining > 0:
+        seq.num_cached_tokens = len(reusable) * self.block_size
+        total_blocks = self.required_blocks(seq.prompt_len + max(0, num_new_tokens))
+        while len(seq.block_table) < total_blocks:
+            logical_block = len(seq.block_table)
             fresh_id = self.allocate_fresh_block()
-            fresh_block = self.blocks[fresh_id]
-            fresh_block.token_ids = list(
-                prompt_tokens[num_full_blocks * self.block_size :]
-            )
+            block = self.blocks[fresh_id]
+            start = logical_block * self.block_size
+            block.token_ids = list(prompt_tokens[start : start + self.block_size])
+            if len(block.token_ids) == self.block_size:
+                parent_hash = None
+                if logical_block > 0:
+                    parent_id = seq.block_table[logical_block - 1]
+                    parent_hash = self.blocks[parent_id].hash
+                block.hash = compute_block_hash(parent_hash, block.token_ids)
             seq.block_table.append(fresh_id)
-
-        if num_new_tokens and not self.may_append(seq, num_new_tokens):
-            # Callers should use can_allocate first.  Keep this guard so direct
-            # use cannot leave a silently undersized block table.
-            self.deallocate(seq)
-            raise RuntimeError("Out of KV cache blocks while reserving lookahead.")
 
     def may_append(self, seq, num_new_tokens: int = 1) -> bool:
         """Reserve logical blocks for upcoming generated token positions.
@@ -199,10 +235,8 @@ class BlockManager:
     def record_tokens(self, seq, start_position: int, token_ids) -> None:
         """Synchronize token metadata with already-reserved block-table slots.
 
-        K/V tensors remain owned by the Hugging Face cache, but maintaining the
-        control-plane contents makes address translation and block lifecycle
-        independently testable.  Writes must be contiguous and may not mutate a
-        shared prefix block.
+        The paged runner separately writes K/V tensors to the translated slots.
+        Metadata writes must be contiguous and may not mutate a shared prefix.
         """
         for index, token_id in enumerate(token_ids):
             position = start_position + index
@@ -229,8 +263,34 @@ class BlockManager:
                     parent_id = seq.block_table[logical_block - 1]
                     parent_hash = self.blocks[parent_id].hash
                 block.hash = compute_block_hash(parent_hash, block.token_ids)
-                if self.enable_prefix_caching:
-                    self.hash_to_block_id.setdefault(block.hash, block_id)
+
+    def mark_computed(self, seq, start_position: int, num_tokens: int) -> None:
+        """Publish that model K/V writes for a contiguous range completed.
+
+        Call this only after every transformer layer has successfully enqueued
+        its key/value write on the runner's CUDA stream. Later reads use that
+        same stream, so CUDA ordering makes them observe the writes without a
+        host synchronization. A full page then becomes eligible for reuse.
+        """
+        if num_tokens < 0:
+            raise ValueError("num_tokens must be non-negative")
+        for position in range(start_position, start_position + num_tokens):
+            block_id = self.physical_block_id(seq, position)
+            block = self.blocks[block_id]
+            offset = position % self.block_size
+            if offset < block.computed_tokens:
+                continue
+            if offset != block.computed_tokens:
+                raise RuntimeError("physical KV writes must be marked contiguous")
+            if offset >= len(block.token_ids):
+                raise RuntimeError("cannot mark KV computed before recording token")
+            block.computed_tokens += 1
+            if (
+                self.enable_prefix_caching
+                and block.computed_tokens == self.block_size
+                and block.hash is not None
+            ):
+                self.hash_to_block_id.setdefault(block.hash, block_id)
 
     def record_token(self, seq, token_id: int) -> None:
         """Record the sequence's just-appended token in its physical slot."""

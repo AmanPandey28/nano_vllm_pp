@@ -5,15 +5,17 @@ from dataclasses import dataclass, field
 class EngineConfig:
     device: str = "auto"
     dtype: str = "auto"
+    model_backend: str = "hf"
     block_size: int = 256
+    kv_cache_num_blocks: int | None = None
     max_num_seqs: int = 256
     max_num_batched_tokens: int = 2048
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.90
     enforce_eager: bool = True
-    # Prefix hashing exists in BlockManager, but the Hugging Face KV tensors are
-    # not stored in that block pool yet.  Keep the engine feature off rather
-    # than silently claiming compute reuse that does not happen.
+    # Physical prefix reuse is available with model_backend="paged". The HF
+    # compatibility backend rejects it because its per-request DynamicCache
+    # cannot safely alias pages owned by BlockManager.
     enable_prefix_caching: bool = False
     enable_chunked_prefill: bool = False
     max_prefill_chunk_size: int = 512
@@ -27,11 +29,13 @@ class EngineConfig:
         if not isinstance(self.device, str) or not self.device.strip():
             raise ValueError("device must be a non-empty string")
         if self.dtype not in {"auto", "float32", "float16", "bfloat16"}:
-            raise ValueError(
-                "dtype must be one of: auto, float32, float16, bfloat16"
-            )
+            raise ValueError("dtype must be one of: auto, float32, float16, bfloat16")
+        if self.model_backend not in {"hf", "paged"}:
+            raise ValueError("model_backend must be one of: hf, paged")
         if self.block_size <= 0:
             raise ValueError("block_size must be > 0")
+        if self.kv_cache_num_blocks is not None and self.kv_cache_num_blocks <= 0:
+            raise ValueError("kv_cache_num_blocks must be > 0 or None")
         if self.max_num_seqs <= 0:
             raise ValueError("max_num_seqs must be > 0")
         if self.max_num_batched_tokens <= 0:

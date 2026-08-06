@@ -41,10 +41,10 @@ class LLMEngine:
             raise NotImplementedError(
                 "this educational runner currently supports eager execution only"
             )
-        if engine_config.enable_prefix_caching:
+        if engine_config.enable_prefix_caching and engine_config.model_backend == "hf":
             raise NotImplementedError(
-                "prefix hashes are implemented in BlockManager, but physical "
-                "Hugging Face KV reuse is not integrated; keep prefix caching disabled"
+                "prefix caching requires model_backend='paged'; Hugging Face "
+                "DynamicCache tensors are private to each request"
             )
 
         self.engine_config = engine_config
@@ -52,6 +52,13 @@ class LLMEngine:
         device = resolve_device(engine_config.device)
         self.device = str(device)
         self.compute_dtype = resolve_dtype(device, engine_config.dtype)
+
+        if engine_config.model_backend == "paged" and device.type != "cuda":
+            raise RuntimeError("model_backend='paged' requires a CUDA device")
+        if engine_config.model_backend == "paged" and (load_in_4bit or load_in_8bit):
+            raise NotImplementedError(
+                "bitsandbytes loading is not integrated with the custom paged model"
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True
@@ -85,12 +92,21 @@ class LLMEngine:
                 "bitsandbytes 4/8-bit loading is supported only on CUDA in "
                 "this project; use the educational weight-only modules for CPU"
             )
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
-        # Accelerate/bitsandbytes dispatches quantized modules while loading;
-        # calling .to() afterward is unsupported for several bnb versions.
-        if not (load_in_4bit or load_in_8bit):
-            self.model = self.model.to(self.device)
-        self.model.eval()
+        if engine_config.model_backend == "paged":
+            from ..paged.model import load_paged_qwen3
+
+            self.model, _ = load_paged_qwen3(
+                model_path, self.device, self.compute_dtype
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path, **model_kwargs
+            )
+            # Accelerate/bitsandbytes dispatches quantized modules while loading;
+            # calling .to() afterward is unsupported for several bnb versions.
+            if not (load_in_4bit or load_in_8bit):
+                self.model = self.model.to(self.device)
+            self.model.eval()
 
         self.model_config = self._build_model_config(model_path)
         self.num_kv_blocks = self._estimate_kv_blocks()
@@ -99,18 +115,36 @@ class LLMEngine:
             engine_config.block_size,
             enable_prefix_caching=engine_config.enable_prefix_caching,
         )
-        self.model_runner = ModelRunner(
-            self.model,
-            self.model_config,
-            engine_config,
-            self.device,
-            self.block_manager,
-        )
+        if engine_config.model_backend == "paged":
+            from ..paged.runner import PagedModelRunner
+
+            self.model_runner = PagedModelRunner(
+                self.model,
+                self.model_config,
+                engine_config,
+                self.device,
+                self.block_manager,
+                self.num_kv_blocks,
+            )
+        else:
+            self.model_runner = ModelRunner(
+                self.model,
+                self.model_config,
+                engine_config,
+                self.device,
+                self.block_manager,
+            )
         self.scheduler = Scheduler(engine_config, self.block_manager)
         if engine_config.enable_spec_decode:
-            from ..spec_decode.manager import SpecDecodeManager
+            if engine_config.model_backend == "paged":
+                from ..paged.spec_decode import PagedSpecDecodeManager
 
-            self.model_runner.spec_decode_manager = SpecDecodeManager(
+                manager_class = PagedSpecDecodeManager
+            else:
+                from ..spec_decode.manager import SpecDecodeManager
+
+                manager_class = SpecDecodeManager
+            self.model_runner.spec_decode_manager = manager_class(
                 self.model_runner, max_spec_tokens=engine_config.max_spec_tokens
             )
         self.step_counter = 0
@@ -149,6 +183,7 @@ class LLMEngine:
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         text_cfg = getattr(hf_config, "text_config", hf_config)
+        rope_parameters = getattr(text_cfg, "rope_parameters", None) or {}
 
         return ModelConfig(
             model_path=model_path,
@@ -169,9 +204,10 @@ class LLMEngine:
                 text_cfg, "intermediate_size", getattr(text_cfg, "ffn_dim", 0)
             ),
             vocab_size=text_cfg.vocab_size,
-            dtype=str(self.model.dtype),
+            dtype=str(self.compute_dtype),
             tie_word_embeddings=getattr(hf_config, "tie_word_embeddings", False),
-            rope_theta=getattr(text_cfg, "rope_theta", 10000.0),
+            rope_theta=getattr(text_cfg, "rope_theta", None)
+            or rope_parameters.get("rope_theta", 10000.0),
         )
 
     def _estimate_kv_blocks(self) -> int:
@@ -186,6 +222,9 @@ class LLMEngine:
 
         The factor of 2 accounts for both key and value tensors.
         """
+        if self.engine_config.kv_cache_num_blocks is not None:
+            return self.engine_config.kv_cache_num_blocks
+
         block_size = self.engine_config.block_size
         num_layers = self.model_config.num_layers
         num_kv_heads = self.model_config.num_kv_heads
@@ -208,8 +247,9 @@ class LLMEngine:
                 - torch.cuda.memory_allocated(device)
             )
             # Keep headroom for activations, allocator fragmentation, and
-            # non-PyTorch CUDA allocations. This remains an admission estimate;
-            # Hugging Face owns the actual dynamic cache tensors.
+            # non-PyTorch CUDA allocations. The paged backend immediately
+            # materializes exactly this many physical blocks; the HF backend
+            # uses the value only for conservative logical admission.
             kv_budget = min(free_bytes, target_headroom) - 512 * 1024 * 1024
             num_blocks = int(kv_budget // kv_per_block)
             if num_blocks < 1:
@@ -237,7 +277,10 @@ class LLMEngine:
             if fallback_token is None:
                 raise ValueError("tokenizer produced no tokens for the empty prompt")
             token_ids = [fallback_token]
-        if len(token_ids) + sampling_params.max_tokens > self.engine_config.max_model_len:
+        if (
+            len(token_ids) + sampling_params.max_tokens
+            > self.engine_config.max_model_len
+        ):
             raise ValueError(
                 "prompt tokens + max_tokens exceed max_model_len: "
                 f"{len(token_ids)} + {sampling_params.max_tokens} > "

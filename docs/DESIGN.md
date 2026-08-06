@@ -6,15 +6,16 @@ mechanism executed by an accelerator.
 
 ## 1. Scope
 
-NanoVLLM++ is a single-process educational inference runtime around a
-Transformers causal language model. Its strongest value is inspectability:
-each request has explicit state, the scheduler has explicit queues and budgets,
-and prefill, decode, speculation, and completion are separate operations.
+NanoVLLM++ is a single-process educational inference runtime with two model
+backends. The Hugging Face backend is a compatibility oracle. The CUDA Qwen3
+backend makes the vLLM data plane concrete: a global fixed-size K/V page pool,
+per-request block tables, tensorized slot mappings, Triton cache writes, direct
+paged decode attention, and physically shared prefix pages.
 
-The project does **not** implement a physical paged-attention cache, a fused
-multi-request model batch, graph compilation, custom attention kernels, or
-distributed execution. Those are production roadmap items, not hidden
-assumptions.
+Its strongest value is inspectability. It is not production vLLM: paged
+prefill uses a readable gather plus PyTorch SDPA, mixed prefill/decode work is
+split into two model forwards, and graph capture, preemption/swap, distributed
+execution, broad model support, and production kernel tuning are absent.
 
 ## 2. Ownership and call graph
 
@@ -27,10 +28,14 @@ LLM -> LLMEngine
        |-- Sequence registry                 request state and results
        |-- Scheduler                         waiting/running policy
        |     `-- MixedBatchScheduler         chunking and token budget
-       |-- BlockManager                      logical capacity accounting
-       `-- ModelRunner                       HF forward + sample
-              |-- Hugging Face model         actual compute and KV tensors
-              `-- SpecDecodeManager          optional exact greedy path
+       |-- BlockManager                      page allocation + block tables
+       |-- ModelRunner                       HF compatibility path
+       |     `-- Hugging Face model          per-request DynamicCache
+       `-- PagedModelRunner                  physical Qwen3 CUDA path
+             |-- PagedQwen3ForCausalLM       transformer computation
+             |-- global [2,L,P,B,Hkv,D] KV   physical cache ownership
+             |-- Triton kernels              slot writes + paged decode
+             `-- PagedSpecDecodeManager      accepted-prefix commit
 ```
 
 `LLM` is a deliberately empty facade over `LLMEngine`. `LLMEngine.step()` is
@@ -54,36 +59,38 @@ Important counters:
 - `block_table[logical_block]` contains the corresponding reserved physical
   page ID. `BlockManager.slot_mapping()` translates token positions to flat
   page slots for control-plane validation.
-- `_kv_cache` is the actual per-request Hugging Face cache while active.
+- On the HF backend, `_kv_cache` is the per-request DynamicCache.
+- On the paged backend, `block_table` is the only request-local K/V address
+  state; tensor bytes live in the runner's global pool.
 
-Completion is checked immediately after the prefill produces the first output
-token. This matters for `max_tokens=1` and for an EOS first token. Finishing a
-request releases logical blocks and deletes its K/V cache. Completed token
-state remains in the engine registry until the output is consumed; synchronous
-`generate()` and the server call `forget_request()` automatically.
+Completion is checked immediately after prefill produces the first output
+token. Finishing releases page references and deletes an HF DynamicCache when
+present. Zero-reference physical pages remain reusable by hash until their page
+ID is selected for fresh allocation, at which point stale hash identity and
+physical-validity metadata are cleared.
 
-## 4. Actual KV-cache invariant
+## 4. KV-cache invariants in both backends
 
-After a completed prefill, the Hugging Face cache contains all prompt tokens
-and the sequence contains prompt plus the first generated token. During normal
-decode the invariant is:
+After completed prefill, cache storage contains all prompt tokens and the
+sequence contains prompt plus the first generated token. During normal decode:
 
 ```text
 cache length = sequence token count - 1
 cache covers every token before seq.last_token
 ```
 
-`run_decode()` supplies `seq.last_token` with the old cache. The returned cache
-therefore includes that input token, and the sampled output becomes the new
-uncached last token.
+`run_decode()` supplies `seq.last_token`. HF returns a cache extended by that
+input. The paged runner writes its K/V to the translated physical slot and then
+publishes that slot as computed. Sampling appends a new uncached last token.
 
-Chunked prefill preserves a different intermediate invariant: the cache holds
-exactly the already-computed prompt prefix. Every later chunk passes that cache
-as `past_key_values`; omitting it would reset attention context and position
-semantics. The deterministic test double records cache lengths `0, 2, 4` for a
-five-token prompt split as `2 + 2 + 1`.
+Chunked prefill preserves a different intermediate invariant: only the
+already-computed prompt prefix is physically valid. HF carries DynamicCache
+between chunks. The paged path begins the next chunk at
+`num_computed_tokens`, writes through the same block table, and attends to the
+logical context gathered from prior pages. The deterministic HF test double
+records cache lengths `0, 2, 4` for a five-token prompt split `2 + 2 + 1`.
 
-## 5. Logical block accounting—not PagedAttention
+## 5. Physical pages, block tables, and prefix validity
 
 For element width `b`, decoder layers `L`, K/V heads `Hkv`, and head dimension
 `dh`, ordinary dense K/V storage per token is:
@@ -92,12 +99,11 @@ For element width `b`, decoder layers `L`, K/V heads `Hkv`, and head dimension
 2 * L * Hkv * dh * b
 ```
 
-The factor two is key plus value. `LLMEngine` estimates how many fixed-size
-logical blocks fit under current CUDA free memory and the configured
-utilization target, with extra runtime headroom. Prompt admission includes one
-extra position because the final prefill call emits the first generated token.
-Decode and speculation reserve their maximum upcoming positions
-conservatively.
+The factor two is key plus value. For page size `B`, the paged runner allocates
+one tensor with shape `[2, L, P, B, Hkv, dh]`. `P` is either the explicit
+`kv_cache_num_blocks` override or an estimate from live CUDA headroom. Prompt
+admission includes one output position; decode and speculation reserve their
+maximum lookahead conservatively.
 
 Device selection is explicit. `device="cuda"` fails when CUDA is hidden rather
 than silently benchmarking the CPU; `device="auto"` retains convenient CPU
@@ -105,22 +111,35 @@ fallback for functional examples. Automatic CUDA dtype selection uses BF16
 when supported and FP16 otherwise. K/V capacity uses that compute/cache dtype,
 not the storage width of a quantized parameter.
 
-`BlockManager` stores IDs, refcounts, hashes, and token metadata only. It
-implements logical-position to physical-page translation and flat slot
-mapping, and the runner records generated token metadata after sampling. No
-layer K/V tensor is indexed through those slots; actual tensors grow inside
-the HF cache. Therefore:
+For token position `p`, logical page `p // B` selects a physical page ID from
+the sequence block table, and flat slot `page_id * B + p % B` selects one row
+inside the pool. `PagedModelRunner` converts positions, slots, context lengths,
+query offsets, and block tables to device tensors. Each attention layer:
 
-- logical capacity, lifecycle, block-table translation, and slot metadata are
-  implemented;
-- physical non-contiguous tensor paging and a device slot mapping consumed by
-  attention are not;
-- prefix hashes are testable as a library concept, but engine-level prefix
-  caching is rejected because metadata reuse without tensor reuse is false.
+1. projects and applies Q/K normalization and RoPE;
+2. scatters new K/V to its physical page through a Triton kernel;
+3. runs gathered causal SDPA for prefill, or an online-softmax Triton decode
+   kernel that reads non-contiguous pages directly through the block table.
 
-A production implementation would preallocate per-layer K/V pools, copy the
-Python mappings into batch/device metadata, write new K/V into those slots,
-and make attention gather through the block table.
+The allocator separates token identity from physical validity. Admission knows
+all prompt token IDs, but `Block.computed_tokens` advances only after every
+model layer has enqueued its writes successfully. A full block hash is
+published for prefix reuse only after `computed_tokens == block_size`. All
+model work is serialized on the same CUDA stream, so later cache reads are
+ordered after those writes without a host-wide synchronize. A future
+multi-stream runner would need events before publishing across streams. This
+two-phase protocol prevents a request from observing uninitialized K/V.
+
+Hashes are chained from parent hash plus local token IDs, so equal local blocks
+do not match under different ancestors. Reuse is full-block only. If a prompt
+ends exactly on a page boundary, the final page is deliberately recomputed:
+the KV cache stores states, not next-token logits, so at least one query token
+must execute to obtain the first output distribution. This also avoids partial
+shared-page copy-on-write in the implemented policy.
+
+The HF backend still uses DynamicCache and therefore rejects physical prefix
+caching. The same allocator is used for admission metadata, but only the paged
+backend makes its addresses part of model execution.
 
 ## 6. Scheduler and chunked prefill
 
@@ -137,10 +156,12 @@ With chunking, `MixedBatchScheduler` builds one iteration:
 5. Optionally reverse the phase order when decode priority is disabled.
 
 Rotation avoids a long prompt monopolizing the head of the FIFO while short
-prompts could fit. The policy is iteration-level continuous scheduling, but
-`ModelRunner.run()` loops over items and invokes the HF model separately. A
-production batch would flatten tokens, build position/slot metadata, issue one
-batched graph, and scatter outputs back to sequences.
+prompts could fit. The HF compatibility runner invokes the model per item. The
+paged runner flattens all scheduled prefill tokens into one projection/model
+batch and all ordinary decode requests into another. A mixed scheduling
+iteration therefore uses at most two forwards because prefill needs causal
+multi-token attention while decode uses the direct page kernel. Output row
+indices scatter sampled tokens back to requests.
 
 If unfinished work exists but no item can be scheduled, `LLMEngine.step()`
 raises with queue/block state instead of spinning forever.
@@ -181,12 +202,13 @@ bonus token. Verification accepts the longest proposal prefix matching target
 argmax.
 
 - On the first mismatch after `j` accepted tokens, emit those `j` tokens plus
-  the target correction, then crop overcomputed cache state to exclude the
-  correction.
+  the target correction. HF crops overcomputed cache state. Paged execution
+  leaves rejected bytes uncommitted; logical lengths hide them and a later
+  write overwrites their slots.
 - If all `k` match, emit all proposals plus the bonus; the returned cache
   already excludes only that bonus.
-- If EOS or a stop-token ID occurs inside the burst, truncate there and crop to
-  restore the cache invariant.
+- If EOS or a stop-token ID occurs inside the burst, truncate there and commit
+  only positions before the terminal token.
 - Stop strings and stochastic sampling use the ordinary one-token path. Exact
   stochastic speculative decoding would require rejection sampling and a
   draft probability distribution, which this n-gram proposer does not have.
@@ -252,38 +274,37 @@ PyTorch Profiler, accelerator tools, or Nsight on a real deployment.
 ## 12. Verification
 
 The deterministic CPU suite covers configuration validation, sampling and
-seeds, block lifecycle/hash eviction, block-table translation, generated-token
-slot metadata, exact-boundary admission, chunk cache carry-over, max-token
-completion, speculative rejection/full acceptance/EOS truncation, scheduler
-lookahead and rotation, INT4 odd-width packing, storage accounting, profiler
-math, and JSONL traces.
+seeds, block lifecycle/hash eviction, the physical-validity publication gate,
+prefix sharing, exact-boundary recomputation, non-contiguous page scatter and
+gather, grouped-query attention, chunk cache carry-over, speculative
+rejection/full acceptance/EOS truncation, scheduler lookahead and rotation,
+INT4 odd-width packing, storage accounting, profiler math, and JSONL traces.
 
-CUDA-marked tests additionally execute the packed INT4 and INT8 teaching
-layers on the selected GPU and verify the device manifest. They skip when CUDA
-is not visible, while `python -m nanovllm_pp.benchmarks.gpu_smoke` is the
-fail-fast host/device check used before performance runs.
+CUDA-marked tests additionally compile the Triton paged-decode kernel on the
+selected GPU, compare it with the PyTorch page-table oracle, execute packed
+INT4/INT8 teaching layers, and verify the device manifest. They skip when CUDA
+is invisible. The end-to-end validator loads HF and custom Qwen3 paths, prints
+greedy parity, exposes the physical tensor shape, and demonstrates prefix reuse.
 
 ```bash
 ruff check nanovllm_pp tests
 pytest -q
 python -m nanovllm_pp.benchmarks.gpu_smoke
+python -m nanovllm_pp.benchmarks.validate_paged_backend ./Qwen3-0.6B
 ```
 
 The retained [RTX 5050 validation record](GPU_VALIDATION.md) covers one local
-Qwen3-0.6B environment: CUDA smoke, all 42 tests, greedy cache/engine parity,
-chunk parity, speculative parity, quantized storage/timing, and PyTorch CUDA
-profiling. Broader qualification remains necessary: stochastic distribution
-tests, long-context stress, multiple cache implementations and Transformers
-versions, server load/tail latency, task-level quantized accuracy, thermal/power
-control, and workload sweeps.
+Qwen3-0.6B environment, including SM120 Triton compilation, physical prefix
+reuse, paged speculation, and comparison with the HF backend. Broader
+qualification remains necessary: long-context stress, server tail latency,
+task-level quantized accuracy, thermal control, and workload sweeps.
 
 ## 13. Production roadmap
 
-1. Replace per-sequence dynamic caches with a preallocated physical K/V pool
-   consumed by paged attention.
-2. Build real heterogeneous tensor batches and output scatter metadata.
+1. Replace gathered SDPA prefill with a fused variable-length paged kernel.
+2. Fuse mixed prefill/decode execution where the accelerator backend supports it.
 3. Add preemption/eviction and swap or recompute policy under memory pressure.
-4. Implement physical prefix-cache reuse with safe invalidation.
+4. Add partial-page prefix copy-on-write and a bounded cache eviction policy.
 5. Add compiled shape buckets, graph-break analysis, and CUDA/accelerator graphs.
 6. Replace naive quantization with calibrated formats and fused kernels.
 7. Add draft-model stochastic speculation with lossless rejection sampling.

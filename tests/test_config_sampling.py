@@ -17,6 +17,8 @@ from nanovllm_pp.sampling_params import SamplingParams
         ({"spec_proposer_type": "draft_model"}, "ngram"),
         ({"device": ""}, "device"),
         ({"dtype": "fp8"}, "dtype"),
+        ({"model_backend": "unknown"}, "model_backend"),
+        ({"kv_cache_num_blocks": 0}, "kv_cache_num_blocks"),
     ],
 )
 def test_engine_config_rejects_invalid_values(kwargs, message):

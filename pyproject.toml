@@ -28,6 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 server = ["fastapi>=0.100", "uvicorn", "pydantic>=2"]
 quantization = ["bitsandbytes"]
+paged = ["triton>=3.0", "safetensors>=0.4"]
 test = ["pytest"]
 
 [project.urls]

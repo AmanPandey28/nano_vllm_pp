@@ -46,6 +46,49 @@ The smoke test completed a 1024-by-1024 BF16 matrix multiplication on
 suite ran all 42 tests, including CUDA INT8/INT4 execution tests. In the
 restricted process, 40 passed and the two CUDA tests skipped as designed.
 
+## Physical paged-KV validation on August 6, 2026
+
+The new `model_backend="paged"` path was validated separately from the older
+HF-cache measurements below. The complete suite passed with host GPU access:
+
+```text
+50 passed in 1.84s
+```
+
+The CUDA test writes and reads deliberately non-contiguous physical pages,
+compiles the Triton online-softmax decode kernel for SM120, and compares its
+GQA output with a PyTorch block-table oracle. A separate tiny randomly
+initialized Qwen3 test copies identical weights into the HF and custom models
+and checks both prefill and decode logits. All passed.
+
+The repeatable end-to-end command is:
+
+```bash
+python -m nanovllm_pp.benchmarks.validate_paged_backend \
+  /home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B
+```
+
+With 64 four-token pages it allocated a physical tensor of shape
+`[2, 28, 64, 4, 8, 128]` (29,360,128 bytes). Both four-token greedy samples
+matched the HF backend. A second 13-token prompt sharing a common prefix reused
+12 physical K/V tokens and computed only the final prompt token; the observed
+block table was `[6, 7, 8, 10]`. A repetitive speculative workload proposed
+five tokens, accepted all five, and emitted seven decode tokens in two target
+forwards after the initial prefill token.
+
+Automatic capacity sizing was also exercised without a block-count override.
+At the default 256-token page size and 0.90 utilization it allocated 188 pages:
+`[2, 28, 188, 256, 8, 128]`, or 5.140625 GiB of actual BF16 K/V storage, then
+completed generation. This is now a physical allocation rather than the older
+logical admission estimate.
+
+Greedy identity is a sensitive smoke test, not a universal numerical contract.
+In a longer six-token sample, one of two prompts chose a different sixth token
+after five identical tokens; custom Triton/PyTorch reduction order can change
+an argmax when logits are nearly tied. The architectural tests therefore also
+compare tensors within tolerance, and performance/quality claims should use a
+defined evaluation corpus rather than require bitwise equality.
+
 The post-revision Qwen3 engine tutorial also completed on `cuda:0`: three
 prompts generated 24 tokens each in 24 engine steps. After termination the
 scheduler reported empty waiting/running queues and all 188 blocks returned to
@@ -137,5 +180,5 @@ every matmul; it is not a fused INT8 compute kernel.
 - Evaluate quantized perplexity/task accuracy on a representative dataset.
 - Capture Nsight Systems/Compute traces and correlate host gaps, kernels,
   memory bandwidth, and power.
-- Add true tensor batching and physical paged K/V before making serving-scale
-  throughput or capacity claims.
+- Replace gathered paged prefill with a fused variable-length kernel and add
+  graph capture before making serving-scale throughput claims.

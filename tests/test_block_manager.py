@@ -86,3 +86,45 @@ def test_prompt_boundary_reserves_first_generated_token_slot():
     seq.append_token(3)
     manager.record_token(seq, 3)
     assert manager.slot_mapping(seq, [2]) == [seq.block_table[1] * 2]
+
+
+def test_prefix_hash_is_published_only_after_physical_page_is_complete():
+    manager = BlockManager(num_blocks=6, block_size=2, enable_prefix_caching=True)
+    first = make_sequence([1, 2, 3])
+    manager.allocate(first)
+    first_page = manager.blocks[first.block_table[0]]
+
+    assert first_page.hash is not None
+    assert first_page.hash not in manager.hash_to_block_id
+    manager.mark_computed(first, 0, 1)
+    assert first_page.hash not in manager.hash_to_block_id
+    manager.mark_computed(first, 1, 1)
+    assert manager.hash_to_block_id[first_page.hash] == first_page.block_id
+
+
+def test_prefix_allocation_reuses_physically_computed_pages():
+    manager = BlockManager(num_blocks=8, block_size=2, enable_prefix_caching=True)
+    first = make_sequence([1, 2, 3, 4, 5])
+    manager.allocate(first)
+    manager.mark_computed(first, 0, first.prompt_len)
+    shared_pages = first.block_table[:2]
+    manager.deallocate(first)
+
+    second = make_sequence([1, 2, 3, 4, 9])
+    assert manager.cached_prefix_tokens(second) == 4
+    manager.allocate(second)
+
+    assert second.block_table[:2] == shared_pages
+    assert second.num_cached_tokens == 4
+    assert manager.blocks[shared_pages[0]].computed_tokens == 2
+
+
+def test_exact_block_boundary_keeps_one_query_block_for_first_token_logits():
+    manager = BlockManager(num_blocks=8, block_size=2, enable_prefix_caching=True)
+    first = make_sequence([1, 2, 3, 4])
+    manager.allocate(first)
+    manager.mark_computed(first, 0, first.prompt_len)
+    manager.deallocate(first)
+
+    second = make_sequence([1, 2, 3, 4])
+    assert manager.cached_prefix_tokens(second) == 2

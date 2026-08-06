@@ -91,7 +91,8 @@ class Scheduler:
 
         while self.waiting and len(scheduled) < max_seqs:
             seq = self.waiting[0]
-            remaining = seq.uncomputed_tokens
+            cached = self.block_manager.cached_prefix_tokens(seq)
+            remaining = seq.prompt_len - cached
             if remaining > budget:
                 break
             # The final prefill forward emits the first generated token, so its
@@ -103,6 +104,7 @@ class Scheduler:
                 self.block_manager.allocate(seq, num_new_tokens=1)
             except RuntimeError:
                 break
+            seq.num_computed_tokens = seq.num_cached_tokens
             seq.status = SequenceStatus.RUNNING
             scheduled.append(
                 ScheduledItem(seq=seq, kind="prefill", num_tokens=remaining)
@@ -130,9 +132,7 @@ class Scheduler:
         return ScheduledBatch(scheduled)
 
     def _decode_lookahead(self, seq):
-        remaining = max(
-            1, seq.sampling_params.max_tokens - seq.num_generated_tokens
-        )
+        remaining = max(1, seq.sampling_params.max_tokens - seq.num_generated_tokens)
         if (
             self.config.enable_spec_decode
             and seq.sampling_params.temperature == 0
