@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..observability.profiler import serving_metrics_snapshot
+
 
 class CompletionRequest(BaseModel):
     model: str
@@ -70,6 +72,8 @@ app = FastAPI(title="NanoVLLM++ (unconfigured)")
 def create_app(engine, SamplingParams):
     api = FastAPI(title="NanoVLLM++")
     step_lock = asyncio.Lock()
+    if getattr(engine, "_request_tracker", None) is None:
+        engine.enable_profiling()
 
     def make_params(req):
         return SamplingParams(
@@ -122,15 +126,7 @@ def create_app(engine, SamplingParams):
     @api.get("/metrics")
     async def metrics():
         async with step_lock:
-            state = engine.scheduler.debug_state()
-        return {
-            "waiting_requests": state["waiting"],
-            "running_requests": state["running"],
-            "free_logical_blocks": state["blocks"]["free_blocks"],
-            "used_logical_blocks": state["blocks"]["used_blocks"],
-            "total_logical_blocks": state["blocks"]["total_blocks"],
-            "engine_steps": engine.step_counter,
-        }
+            return serving_metrics_snapshot(engine)
 
     @api.post("/v1/completions")
     async def completions(req: CompletionRequest):

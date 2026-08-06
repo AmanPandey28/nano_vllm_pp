@@ -189,11 +189,7 @@ class RequestTracker:
         for r in self.requests.values():
             if r["first_token_t"]:
                 ttft_vals.append((r["first_token_t"] - r["enqueue_t"]) * 1000)
-            if (
-                r["completion_t"]
-                and r["first_token_t"]
-                and r["tokens_generated"] > 1
-            ):
+            if r["completion_t"] and r["first_token_t"] and r["tokens_generated"] > 1:
                 gen_time = (r["completion_t"] - r["first_token_t"]) * 1000
                 intervals = r["tokens_generated"] - 1
                 tpot_vals.append(gen_time / intervals)
@@ -234,6 +230,29 @@ class RequestTracker:
                 f"{d.get('mean', '—'):<10}"
             )
         print(f"{'=' * 50}\n")
+
+
+def serving_metrics_snapshot(engine) -> dict:
+    """Build one JSON-safe serving snapshot from engine observability state."""
+    state = engine.scheduler.debug_state()
+    tracker = getattr(engine, "_request_tracker", None)
+    profiler = getattr(engine, "_profiler", None)
+    request_report = tracker.report() if tracker is not None else {}
+    return {
+        "waiting_requests": state["waiting"],
+        "running_requests": state["running"],
+        "free_logical_blocks": state["blocks"]["free_blocks"],
+        "used_logical_blocks": state["blocks"]["used_blocks"],
+        "total_logical_blocks": state["blocks"]["total_blocks"],
+        "engine_steps": engine.step_counter,
+        "profiled_requests": request_report.get("num_requests", 0),
+        "request_latency_ms": {
+            "ttft": request_report.get("ttft", {}),
+            "tpot": request_report.get("tpot", {}),
+            "e2e": request_report.get("e2e", {}),
+        },
+        "engine_profile_ms": profiler.summary() if profiler is not None else {},
+    }
 
 
 def diagnose_slowdown(profiler: EngineProfiler, tracker: RequestTracker) -> list[str]:

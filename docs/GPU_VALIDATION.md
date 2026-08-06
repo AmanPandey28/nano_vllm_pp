@@ -43,8 +43,8 @@ and synchronizes timed regions because CUDA execution is asynchronous.
 
 The smoke test completed a 1024-by-1024 BF16 matrix multiplication on
 `cuda:0`. After the block-table correctness revision, the host-visible test
-suite ran all 41 tests, including CUDA INT8/INT4 execution tests. In the
-restricted process, 39 passed and the two CUDA tests skipped as designed.
+suite ran all 42 tests, including CUDA INT8/INT4 execution tests. In the
+restricted process, 40 passed and the two CUDA tests skipped as designed.
 
 The post-revision Qwen3 engine tutorial also completed on `cuda:0`: three
 prompts generated 24 tokens each in 24 engine steps. After termination the
@@ -52,6 +52,13 @@ scheduler reported empty waiting/running queues and all 188 blocks returned to
 the free pool. That run validates the integrated block-table metadata and
 reclamation path; its sampled 1.53 s latency is not treated as a benchmark
 distribution.
+
+The configured FastAPI server was also exercised against the same model and
+device. Health, non-streaming completions with log probabilities, SSE
+streaming, chat completions, and `/metrics` all returned successfully. After
+three completed requests, the metrics snapshot reported zero queued/running
+requests, all 188 logical blocks free, and populated TTFT, TPOT, E2E, and
+engine-phase summaries.
 
 ## Observed synchronized results
 

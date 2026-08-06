@@ -224,7 +224,7 @@ CPU use is rejected explicitly.
 
 `create_app()` returns a configured FastAPI instance; it does not put engine
 state in a mutable module global. Endpoints include health, logical block/queue
-metrics, completions, chat completions, and SSE streaming.
+and TTFT/TPOT/E2E metrics, completions, chat completions, and SSE streaming.
 
 The engine is not thread-safe, so one `asyncio.Lock` protects admission,
 stepping, snapshots, cleanup, and metrics reads. Model work runs in a worker
@@ -270,7 +270,7 @@ python -m nanovllm_pp.benchmarks.gpu_smoke
 ```
 
 The retained [RTX 5050 validation record](GPU_VALIDATION.md) covers one local
-Qwen3-0.6B environment: CUDA smoke, all 41 tests, greedy cache/engine parity,
+Qwen3-0.6B environment: CUDA smoke, all 42 tests, greedy cache/engine parity,
 chunk parity, speculative parity, quantized storage/timing, and PyTorch CUDA
 profiling. Broader qualification remains necessary: stochastic distribution
 tests, long-context stress, multiple cache implementations and Transformers

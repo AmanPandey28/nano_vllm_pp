@@ -118,7 +118,9 @@ curl -N -X POST http://localhost:8000/v1/completions \
 
 The app uses an async lock around the non-thread-safe engine and yields between
 engine steps. Concurrent requests can therefore join later scheduler
-iterations; model calls themselves remain serialized.
+iterations; model calls themselves remain serialized. `/metrics` reports
+queue depth, logical-block usage, engine steps, phase timing, and TTFT/TPOT/E2E
+latency summaries for requests observed by the server.
 
 ## Tutorials and benchmarks
 
