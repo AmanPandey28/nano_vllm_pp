@@ -151,6 +151,7 @@ python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.bench_paged_backend ./Qwen3-0.6B
 python -m nanovllm_pp.benchmarks.validate_paged_backend ./Qwen3-0.6B
 ```
 

@@ -52,7 +52,7 @@ The new `model_backend="paged"` path was validated separately from the older
 HF-cache measurements below. The complete suite passed with host GPU access:
 
 ```text
-50 passed in 1.84s
+52 passed in 1.54s
 ```
 
 The CUDA test writes and reads deliberately non-contiguous physical pages,
@@ -102,6 +102,35 @@ streaming, chat completions, and `/metrics` all returned successfully. After
 three completed requests, the metrics snapshot reported zero queued/running
 requests, all 188 logical blocks free, and populated TTFT, TPOT, E2E, and
 engine-phase summaries.
+
+### Current HF-versus-paged execution probe
+
+`bench_paged_backend.py` compares the current backends on the same engine API.
+The recorded run used three prompts, 16 forced output tokens per prompt, 128
+physical pages of 16 tokens, and the median of three warmed, CUDA-synchronized
+trials:
+
+| Backend | Time | Output rate | TTFT p50 | TPOT p50 | E2E p50 | Resident | Peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| HF reference | 0.642 s | 74.8 tok/s | 41.9 ms | 40.0 ms | 641.3 ms | 1.14 GiB | 1.15 GiB |
+| Physical paged | 0.251 s | 191.4 tok/s | 27.4 ms | 14.9 ms | 250.4 ms | 1.36 GiB | 1.36 GiB |
+
+The observed output-throughput ratio was 2.56x. This is primarily a comparison
+of execution architectures: the HF reference dispatches requests serially,
+whereas the paged runner batches the three same-mode requests and uses direct
+paged decode. It does **not** isolate page-table indirection as the cause of the
+speedup. Decode remained the dominant phase; the median paged run averaged
+13.899 ms in decode and 15.625 ms total per engine step.
+
+The paged allocation was `[2, 28, 128, 16, 8, 128]`, or 234,881,024 bytes.
+Two of three 16-token completions matched the HF reference exactly. The third
+encountered a numerically sensitive argmax difference, consistent with the
+longer parity caveat above. Reproduce the run with:
+
+```bash
+python -m nanovllm_pp.benchmarks.bench_paged_backend \
+  /home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B
+```
 
 ## Observed synchronized results
 
