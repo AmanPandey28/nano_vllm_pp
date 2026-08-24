@@ -52,9 +52,10 @@ The new `model_backend="paged"` path was validated separately from the older
 HF-cache measurements below. The complete suite passed with host GPU access:
 
 ```text
-52 passed in 1.54s
+58 passed in 1.51s
 ```
 
+The restricted process passed 55 tests and skipped the three CUDA-only tests.
 The CUDA test writes and reads deliberately non-contiguous physical pages,
 compiles the Triton online-softmax decode kernel for SM120, and compares its
 GQA output with a PyTorch block-table oracle. A separate tiny randomly
@@ -203,8 +204,9 @@ every matmul; it is not a fused INT8 compute kernel.
 
 - Repeat under a fixed power/performance mode with more trials and confidence
   intervals.
-- Sweep prompt/output length, concurrency, chunk size, and speculative
-  acceptance rather than relying on one small workload.
+- Extend the completed shape/concurrency/arrival sweep in
+  [STANDARD_BENCHMARKS.md](STANDARD_BENCHMARKS.md) to hundreds of requests,
+  repeated seeds, SLO goodput, and production-vLLM comparison.
 - Run long-context memory stress and out-of-memory recovery tests.
 - Evaluate quantized perplexity/task accuracy on a representative dataset.
 - Capture Nsight Systems/Compute traces and correlate host gaps, kernels,

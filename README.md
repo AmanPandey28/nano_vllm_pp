@@ -152,6 +152,8 @@ python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
 python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
 python -m nanovllm_pp.benchmarks.bench_paged_backend ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.bench_serving ./Qwen3-0.6B \
+  --dataset-name random --random-input-len 256 --random-output-len 64
 python -m nanovllm_pp.benchmarks.validate_paged_backend ./Qwen3-0.6B
 ```
 
@@ -181,6 +183,9 @@ invariants, known limitations, and validation plan. The exact RTX 5050
 environment, synchronized measurements, parity results, and caveats are in
 [docs/GPU_VALIDATION.md](docs/GPU_VALIDATION.md). Design lineage and external
 comparison points are recorded in [docs/REFERENCES.md](docs/REFERENCES.md).
+The fixed-shape, concurrency, ShareGPT, arrival-rate, and physical-prefix
+results are in [docs/STANDARD_BENCHMARKS.md](docs/STANDARD_BENCHMARKS.md), with
+machine-readable JSON under `benchmark_results/`.
 
 ## License
 

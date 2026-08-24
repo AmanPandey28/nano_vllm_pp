@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "engine": {
+    "model_path": "/home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B",
+    "model_backend": "paged",
+    "dtype": "bfloat16",
+    "block_size": 16,
+    "kv_cache_num_blocks": 512,
+    "max_model_len": 512,
+    "max_num_seqs": 8,
+    "max_num_batched_tokens": 2048,
+    "enable_chunked_prefill": true,
+    "enable_prefix_caching": false
+  },
+  "benchmark": {
+    "request_rate": "inf",
+    "max_concurrency": 8,
+    "seed": 17,
+    "required_blocks_without_prefix_reuse": 80
+  },
+  "workload": {
+    "name": "random-32x128",
+    "metadata": {
+      "requested_input_len": 32,
+      "requested_output_len": 128,
+      "seed": 17
+    },
+    "token_stats": {
+      "input_tokens": {
+        "min": 32,
+        "mean": 32.0,
+        "median": 32,
+        "max": 32,
+        "total": 512
+      },
+      "output_tokens": {
+        "min": 128,
+        "mean": 128.0,
+        "median": 128,
+        "max": 128,
+        "total": 2048
+      }
+    }
+  },
+  "result": {
+    "successful_requests": 16,
+    "benchmark_duration_s": 3.933252,
+    "total_input_tokens": 512,
+    "total_output_tokens": 2048,
+    "total_tokens": 2560,
+    "request_throughput_rps": 4.0679,
+    "input_token_throughput_tps": 130.172,
+    "output_token_throughput_tps": 520.689,
+    "total_token_throughput_tps": 650.861,
+    "cached_prompt_tokens": 0,
+    "prefix_cache_hit_fraction": 0.0,
+    "latency_ms": {
+      "ttft": {
+        "mean": 45.414,
+        "p50": 45.47,
+        "p95": 46.425,
+        "p99": 46.549,
+        "min": 44.384,
+        "max": 46.58
+      },
+      "tpot": {
+        "mean": 15.124,
+        "p50": 15.124,
+        "p95": 15.15,
+        "p99": 15.15,
+        "min": 15.098,
+        "max": 15.15
+      },
+      "itl": {
+        "mean": 15.124,
+        "p50": 15.045,
+        "p95": 15.455,
+        "p99": 18.25,
+        "min": 14.524,
+        "max": 24.753
+      },
+      "e2e": {
+        "mean": 1966.197,
+        "p50": 1966.265,
+        "p95": 1969.012,
+        "p99": 1969.132,
+        "min": 1963.344,
+        "max": 1969.162
+      },
+      "client_wait": {
+        "mean": 982.452,
+        "p50": 982.396,
+        "p95": 1964.718,
+        "p99": 1964.756,
+        "min": 0.002,
+        "max": 1964.766
+      }
+    },
+    "max_concurrency_observed": 8,
+    "max_physical_pages_used": 80,
+    "resident_gpu_bytes": 2165207040,
+    "peak_gpu_bytes": 2173079552,
+    "engine_profile_ms": {
+      "steps": 256,
+      "avg_schedule_ms": 0.019,
+      "avg_prefill_ms": 0.351,
+      "avg_decode_ms": 14.919,
+      "avg_mixed_ms": 0.0,
+      "avg_postprocess_ms": 0.006,
+      "avg_total_ms": 15.295,
+      "bottleneck": "decode"
+    },
+    "final_block_state": {
+      "total_blocks": 512,
+      "free_blocks": 512,
+      "used_blocks": 0,
+      "cached_hashes": 0
+    },
+    "cuda": {
+      "device": "cuda:0",
+      "name": "NVIDIA GeForce RTX 5050 Laptop GPU",
+      "compute_capability": "12.0",
+      "total_memory_mib": 7708,
+      "torch_version": "2.12.0+cu130",
+      "torch_cuda_version": "13.0",
+      "bfloat16_supported": true
+    },
+    "physical_kv_cache": {
+      "shape": [
+        2,
+        28,
+        512,
+        16,
+        8,
+        128
+      ],
+      "bytes": 939524096
+    }
+  }
+}
