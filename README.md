@@ -157,6 +157,27 @@ python -m nanovllm_pp.benchmarks.bench_serving ./Qwen3-0.6B \
 python -m nanovllm_pp.benchmarks.validate_paged_backend ./Qwen3-0.6B
 ```
 
+### Live terminal demos
+
+These three entry points print one stop-aware generation, then run the same
+deterministic fixed-output shared-prefix workload and report throughput, TTFT,
+TPOT, ITL, E2E latency, GPU memory, KV-page use, prefix reuse, and engine phase
+timing:
+
+```bash
+python nanovllm_pp/benchmarks/live_paged_baseline.py
+python nanovllm_pp/benchmarks/live_paged_optimized.py
+python nanovllm_pp/benchmarks/live_hf_reference.py
+```
+
+The scripts use `$NVPP_MODEL` when set, otherwise detect the adjacent local
+`Qwen3-0.6B` checkout used by this project and finally fall back to the
+`Qwen/Qwen3-0.6B` Hugging Face ID. Pass `--model PATH` to override it and
+`--help` to see workload and cache-size controls. The baseline paged run has
+chunked prefill and prefix caching disabled; the optimized paged run enables
+both. The HF reference enables chunked prefill but cannot enable physical
+prefix sharing because its `DynamicCache` belongs to each request.
+
 Benchmarks warm the model and synchronize CUDA around timed regions, but they
 remain workload examples rather than universal performance claims. Record the
 model revision, hardware/power mode, software versions, sample distribution,
