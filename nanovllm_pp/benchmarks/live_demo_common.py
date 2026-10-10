@@ -89,16 +89,13 @@ _QUESTIONS = (
 
 
 def _default_model() -> str:
-    """Prefer an explicit model, then the known local checkout, then HF Hub."""
+    """Prefer an explicit model, then the repository checkpoint, then HF Hub."""
     configured = os.environ.get("NVPP_MODEL")
     if configured:
         return configured
 
     repository = Path(__file__).resolve().parents[2]
-    candidates = (
-        repository.parent / "nano_vllm_++" / "Qwen3-0.6B",
-        repository / "Qwen3-0.6B",
-    )
+    candidates = (repository / "Qwen3-0.6B",)
     for candidate in candidates:
         if candidate.is_dir():
             return str(candidate)

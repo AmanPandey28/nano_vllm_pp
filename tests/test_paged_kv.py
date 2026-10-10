@@ -115,3 +115,66 @@ def test_triton_decode_matches_torch_reference_on_cuda():
     )
 
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device is not visible")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "head_dim,kv_heads,query_heads,block_size,lengths",
+    [
+        (7, 2, 4, 4, (1, 4)),
+        (32, 1, 4, 16, (16, 17)),
+        (64, 2, 2, 16, (31, 32)),
+        (128, 2, 8, 16, (63, 65)),
+        (256, 1, 2, 4, (5, 9)),
+        (96, 2, 4, 16, (33, 47)),
+    ],
+)
+def test_cuda_paged_write_decode_boundaries_and_poisoned_padding(
+    dtype,
+    head_dim,
+    kv_heads,
+    query_heads,
+    block_size,
+    lengths,
+):
+    torch.manual_seed(29)
+    pages_per_seq = math.ceil(max(lengths) / block_size)
+    physical_pages = 2 * pages_per_seq + 3
+    keys = torch.full(
+        (physical_pages, block_size, kv_heads, head_dim),
+        float("nan"),
+        device="cuda",
+        dtype=dtype,
+    )
+    values = torch.full_like(keys, float("nan"))
+    order = torch.randperm(physical_pages).tolist()
+    tables = torch.full((2, pages_per_seq), -1, device="cuda", dtype=torch.int32)
+    for row, length in enumerate(lengths):
+        pages = math.ceil(length / block_size)
+        mapping = order[row * pages_per_seq : row * pages_per_seq + pages]
+        tables[row, :pages] = torch.tensor(mapping, device="cuda", dtype=torch.int32)
+        slots = torch.tensor(
+            [
+                mapping[p // block_size] * block_size + p % block_size
+                for p in range(length)
+            ],
+            device="cuda",
+        )
+        new_keys = torch.randn(length, kv_heads, head_dim, device="cuda", dtype=dtype)
+        new_values = torch.randn_like(new_keys)
+        store_kv(new_keys, new_values, keys, values, slots)
+        gathered = gather_paged_kv(keys, values, tables[row], length, block_size)
+        assert torch.equal(gathered[0], new_keys)
+        assert torch.equal(gathered[1], new_values)
+    query = torch.randn(query_heads, 2, head_dim, device="cuda", dtype=dtype).transpose(
+        0, 1
+    )
+    contexts = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    expected = paged_decode_attention_reference(
+        query, keys, values, tables, contexts, block_size
+    )
+    actual = paged_decode_attention(query, keys, values, tables, contexts, block_size)
+    assert torch.isfinite(actual).all()
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 3e-3
+    assert torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)

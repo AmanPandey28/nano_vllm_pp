@@ -71,11 +71,11 @@ def main():
         print(f"HF greedy token parity: {paged_ids == reference_ids}")
 
     first = (
-        "Qualcomm accelerator optimization requires careful memory layout "
+        "GPU inference optimization requires careful memory layout "
         "and kernel fusion. First"
     )
     second = (
-        "Qualcomm accelerator optimization requires careful memory layout "
+        "GPU inference optimization requires careful memory layout "
         "and kernel fusion. Second"
     )
     short = SamplingParams(temperature=0, max_tokens=2, ignore_eos=True)

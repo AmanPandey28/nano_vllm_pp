@@ -1,213 +1,233 @@
 # NanoVLLM++
 
-NanoVLLM++ is a small, readable LLM inference-runtime prototype. It exposes the
-moving parts behind vLLM-style serving: request state, prefill/decode
-separation, iteration-level scheduling, fixed-size KV pages, block tables,
-physical prefix reuse, chunked prefill, exact greedy n-gram speculation,
-sampling, observability, quantization prototypes, and an OpenAI-shaped API.
+A readable, single-GPU LLM inference runtime: continuous batching, chunked
+prefill, physical KV pages and block tables, prefix reuse, and greedy n-gram
+speculation. The CUDA backend runs a custom Qwen3 transformer with Triton KV
+writes and **direct paged decode attention**. A Hugging Face backend provides
+a compatibility/reference path and optional quantized loading.
 
-Two execution backends make the boundary testable. `model_backend="hf"` is the
-general Hugging Face compatibility/reference path. `model_backend="paged"` is
-a CUDA Qwen3 path with a custom transformer, one preallocated global K/V pool,
-Triton page writes, and a Triton decode kernel that follows device block tables
-directly. Paged prefill reads the same physical pool but materializes each
-logical context for PyTorch SDPA, favoring clarity over a production fused
-varlen kernel.
+This is an inspectable systems prototype, **not a production vLLM replacement**.
+It has no CUDA graphs, distributed execution, preemption/swap, or fused paged
+prefill kernel. Prefill gathers the physical context into PyTorch SDPA; decode
+reads noncontiguous pages directly through device block tables.
 
-This is intentionally not a production vLLM replacement. It has no CUDA graph
-capture, preemption/swap, distributed parallelism, fused paged-prefill kernel,
-or broad model-family support.
+[Architecture](docs/DESIGN.md) · [Usage / HTTP API](docs/USAGE.md) ·
+[Reproduce results](docs/REPRODUCING.md) · [Raw evidence](benchmark_results/README.md)
 
-## Feature truth table
+## Results
 
-| Capability | Status | Important boundary |
-|---|---|---|
-| Prefill/decode KV reuse | Both backends | HF DynamicCache or global physical page pool |
-| Chunked prefill | Implemented | Cache is carried across chunks; waiting prompts rotate fairly |
-| Iteration-level scheduling | Implemented | Paged backend tensor-batches prefill and decode groups; a mixed iteration uses at most two forwards |
-| Physical KV pages/block tables | Paged backend | Triton scatter writes; direct page-table decode reads; readable gathered SDPA prefill |
-| Prefix caching | Paged backend | Full physically valid pages only; chained hashes + refcounts |
-| N-gram speculative decode | Greedy sampling | Exact target verification and logical commit of only the accepted physical prefix |
-| Top-k/top-p/min-p/seed/logprobs/stops | Implemented | Speculation falls back to one-token steps for stop strings and stochastic sampling |
-| INT8/packed INT4 modules | Educational implementation | Dequantizes weights before matmul, so it saves storage but is not a fused speed kernel |
-| bitsandbytes NF4/INT8 | Optional CUDA path | Requires the `quantization` extra and CUDA |
-| FastAPI + SSE | Implemented, OpenAI-shaped | Not claimed as wire-compatible with every OpenAI field |
-| CUDA graphs / `torch.compile` | Not implemented | `enforce_eager=False` is rejected explicitly |
-| Tensor/pipeline parallelism | Not implemented | Single Python process and model instance |
+### Controlled serving experiments — October 6, 2026
 
-## Install and test
+Qwen3-0.6B BF16, RTX 5050 Laptop GPU (7,708 MiB visible), PyTorch 2.10.0+cu130,
+Transformers 5.8.1, Triton 3.6.0. Values are **medians of three warmed trials**;
+model loading and kernel warmup are excluded. Laptop clocks/power were not
+locked. These are direct-engine measurements, not HTTP or production capacity.
+
+Same runner, 12 mixed requests (32/256/512 prompt tokens, 16/32 output tokens),
+all submitted together; prefix reuse and speculation disabled:
+
+| Scheduling width | Output tokens/s | TTFT p50 / p95 (ms) | TPOT p95 (ms) | E2E p95 (ms) |
+|---|---:|---:|---:|---:|
+| 1 | 57.969 | 2,648.1 / 4,867.5 | 17.538 | 5,197.4 |
+| 4 | 155.522 | 730.6 / 1,475.9 | 21.459 | 1,890.3 |
+| 8 | 222.731 | 212.9 / 776.9 | 23.782 | 1,305.1 |
+| 8, Poisson arrivals at 4 requests/s | 90.094 | 77.4 / 158.2 | 21.361 | 756.2 |
+
+Width eight delivers **3.84× aggregate throughput** versus width one, while
+per-request TPOT increases. Width is work items per scheduler iteration, not
+total live requests. Eleven of twelve greedy completions match the width-one
+baseline in every trial; bitwise batch invariance is not claimed. Arrival-paced
+throughput includes idle time.
+
+Physical prefix reuse, 12 requests with a shared prefix + 32-token unique suffix,
+16 output tokens, concurrency four:
+
+| Shared prefix | Cache state | Reused prompt tokens | TTFT p50 / p95 (ms) | Output tokens/s |
+|---|---|---:|---:|---:|
+| 64 | Off | 0 | 34.725 / 36.191 | 235.379 |
+| 64 | Warm | 768 | 40.049 / 43.301 | 216.710 |
+| 256 | Off | 0 | 139.124 / 151.483 | 170.994 |
+| 256 | Warm | 3,072 | 34.153 / 35.381 | 235.012 |
+| 256 | Cold start | 2,048 | 34.635 / 137.018 | 207.329 |
+| 512 | Off | 0 | 261.184 / 264.416 | 128.175 |
+| 512 | Warm | 6,144 | 35.108 / 37.209 | 235.875 |
+
+At 256 tokens, warm reuse cuts median TTFT **75.45%** and avoids exactly
+3,072 prefill tokens. All 12 completions match cache-off in every trial at all
+three prefix lengths. The 64-token case has **no consistent benefit**; cold
+start still pays the first prefix computation. A separate 72-page pressure
+case reaches **70/72 live pages (97.22%)**, completes at 93.932 output tokens/s,
+and releases every request reference. Both width and pool size change in that
+case: it tests capacity, not an isolated memory-size speed effect.
+
+[Full methodology and correctness caveats](docs/RUNTIME_EVIDENCE.md) ·
+[Compact CSV](benchmark_results/runtime_evidence/summary.csv) ·
+[All trials, token IDs and traces](benchmark_results/runtime_evidence/results.json)
+
+### Quantized loading — separate HF experiment
+
+Same checkpoint/GPU, but Python 3.12.12, PyTorch 2.12.0+cu130, Transformers
+5.11.0, Triton 3.7.0, bitsandbytes 0.49.2. Three prompts × 12 forced output
+tokens, three repeats; **do not compare these rates to the serving table**.
+
+| Format | Loaded CUDA allocation (GiB) | Output tokens/s | Exact BF16 matches / 3 | Fixed-text mean token NLL |
+|---|---:|---:|---:|---:|
+| BF16 | 1.110 | 75.25 | 3 | 4.8406 |
+| bitsandbytes NF4 | 0.502 | 39.26 | 0 | 4.8781 |
+| bitsandbytes INT8 | 0.732 | 14.01 | 2 | 4.9471 |
+| Custom INT8 storage | 0.705 | 27.61 | 3 | 4.9412 |
+| Custom packed INT4 storage | 0.497 | 17.53 | 0 | 5.5210 |
+
+NF4 saves **54.8% loaded allocation**, but generation is **1.92× slower** here.
+Allocation is measured after loading, before inference: not checkpoint size,
+driver memory, or the paged KV pool. Custom INT8/INT4 modules dequantize full
+weights before floating matmul; they are storage prototypes, not fused integer
+kernels. NLL covers only 75 teacher-forced positions, not corpus quality.
+
+[Storage/compute boundaries and commands](docs/QUANTIZATION_SCOPE.md) ·
+[Raw loading and fidelity results](benchmark_results/runtime_evidence/quantized_loading.json)
+
+### Earlier standard-workload sweep — August 24, 2026
+
+Historical, single warmed runs with different shapes/settings; **not directly
+comparable to the October medians**. Retained for workload coverage:
+
+| Workload (input/output tokens; concurrency) | Output tokens/s | TTFT p50 (ms) |
+|---|---:|---:|
+| Decode-heavy (32/128; 8) | 520.7 | 45.5 |
+| Balanced (256/64; 8) | 423.3 | 219.4 |
+| Prefill-heavy (1,024/16; 4) | 89.2 | 463.1 |
+| ShareGPT (16 variable-length requests; 8) | 393.6 | 53.0 |
+
+The historical balanced HF reference measured 74.0 output tokens/s versus
+423.3 for paged execution. This compares **whole implementations** (serial HF
+dispatch versus custom batched execution), not paging alone. No benchmark
+against production vLLM is claimed.
+
+[Concurrency, arrival-rate, prefix and ShareGPT details](docs/STANDARD_BENCHMARKS.md)
+
+## Quick start
+
+Python 3.10+; the paged backend requires NVIDIA CUDA access and Triton on a
+supported platform. Use an isolated environment and a GPU-supported PyTorch
+build. [Recorded environments and checkpoint hashes](docs/REPRODUCING.md) are
+available for reproduction; loose requirements do not imply testing every
+version or GPU.
 
 ```bash
-pip install -e ".[test]"
-pytest -q
-ruff check nanovllm_pp tests
-```
-
-Optional HTTP and bitsandbytes dependencies:
-
-```bash
-pip install -e ".[server]"
-pip install -e ".[quantization]"
-pip install -e ".[paged]"
-```
-
-## CUDA access and fail-fast validation
-
-Performance runs should request CUDA explicitly. This prevents a restricted
-container or agent sandbox from silently running a GPU benchmark on the CPU:
-
-```bash
-nvidia-smi
-python -m nanovllm_pp.benchmarks.gpu_smoke
-```
-
-If `nvidia-smi` works in a normal terminal but the smoke command reports that
-CUDA is unavailable in an automation environment, that process does not have
-access to `/dev/nvidia*`. Run it with host GPU/device access; reinstalling
-PyTorch inside the isolated process will not expose a hidden device.
-
-The engine accepts `device="auto"`, `"cpu"`, `"cuda"`, or `"cuda:N"` and
-`dtype="auto"`, `"float32"`, `"float16"`, or `"bfloat16"`. CUDA benchmarks in
-this repository request `cuda` and fail clearly when it is not visible. On
-CUDA, automatic dtype selection prefers BF16 when the device supports it and
-otherwise uses FP16.
-
-Download or point to a local Hugging Face causal LM. Qwen3-0.6B is the model
-used in the design examples:
-
-```bash
+git clone https://github.com/AmanPandey28/nano_vllm_pp.git
+cd nano_vllm_pp
+python -m pip install -e '.[paged,server,test]'
 hf download Qwen/Qwen3-0.6B --local-dir ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.gpu_smoke
+python examples/generate.py ./Qwen3-0.6B
 ```
 
-## Basic usage
+Weights are downloaded separately, not committed. Explicit `device="cuda"`
+fails if the process cannot see the GPU. A working host `nvidia-smi` does not
+guarantee that a container can access `/dev/nvidia*`.
 
 ```python
 from nanovllm_pp import LLM, SamplingParams
 
 llm = LLM(
-    "./Qwen3-0.6B",
-    device="cuda",
-    dtype="auto",
-    model_backend="paged",
-    block_size=16,
+    "./Qwen3-0.6B", device="cuda", dtype="bfloat16", model_backend="paged",
+    block_size=16, kv_cache_num_blocks=256, max_num_seqs=4,
+    max_num_batched_tokens=256, max_model_len=1024,
+    enable_chunked_prefill=True, max_prefill_chunk_size=128,
     enable_prefix_caching=True,
-    enable_chunked_prefill=True,
-    enable_spec_decode=True,
 )
-params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=5)
-
-outputs = llm.generate(
-    ["The capital of France is", "Machine learning is"],
-    params,
-)
-for output in outputs:
-    print(output["generated_text"], output["finish_reason"])
+outputs = llm.generate("The capital of France is", SamplingParams(temperature=0, max_tokens=32))
+print(outputs[0]["generated_text"])
 ```
 
-`generate()` is synchronous. For iteration-level admission, call
-`add_request()`, repeatedly call `step()`, read `get_output()` after completion,
-then call `forget_request()` to release retained output state.
-
-The paged backend currently accepts standard full-attention
-`Qwen3ForCausalLM` checkpoints with even `head_dim <= 256`. It rejects
-unsupported model families, non-default RoPE, sliding-window attention,
-bitsandbytes loading, and CPU execution instead of silently falling back.
-`kv_cache_num_blocks=N` is a deterministic demo/test override; otherwise the
-engine sizes the physical pool from live CUDA headroom.
-
-## Serving
-
-```python
-from nanovllm_pp import LLM, SamplingParams
-from nanovllm_pp.server.app import start_server
-
-llm = LLM("./Qwen3-0.6B", device="cuda", enable_chunked_prefill=True)
-start_server(llm, SamplingParams, port=8000)
-```
+For terminal output **and metrics**, choose one of three matched demos:
 
 ```bash
-curl http://localhost:8000/health
-curl -N -X POST http://localhost:8000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3","prompt":"Hello","max_tokens":16,"temperature":0,"stream":true}'
+python -m nanovllm_pp.benchmarks.live_paged_baseline --model ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.live_paged_optimized --model ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.live_hf_reference --model ./Qwen3-0.6B
 ```
 
-The app uses an async lock around the non-thread-safe engine and yields between
-engine steps. Concurrent requests can therefore join later scheduler
-iterations; model calls themselves remain serialized. `/metrics` reports
-queue depth, logical-block usage, engine steps, phase timing, and TTFT/TPOT/E2E
-latency summaries for requests observed by the server.
+Each prints a stop-aware sample, then a fixed-output benchmark. Baseline has
+chunking/prefix reuse off; optimized enables both; HF has chunking but no
+physical prefix reuse. This combined demo is not a one-variable ablation.
 
-## Tutorials and benchmarks
+## HTTP server
 
 ```bash
-python nanovllm_pp/tutorials/01_naive_generation.py ./Qwen3-0.6B
-python nanovllm_pp/tutorials/02_kv_cache.py ./Qwen3-0.6B
-python nanovllm_pp/tutorials/03_engine_basic.py ./Qwen3-0.6B
+python -m nanovllm_pp.server ./Qwen3-0.6B --enable-prefix-caching
+```
 
-python nanovllm_pp/benchmarks/bench_baseline.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_chunked_prefill.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_spec_decode.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_nf4.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_quantization.py ./Qwen3-0.6B
-python nanovllm_pp/benchmarks/bench_profiling.py ./Qwen3-0.6B
-python -m nanovllm_pp.benchmarks.bench_paged_backend ./Qwen3-0.6B
-python -m nanovllm_pp.benchmarks.bench_serving ./Qwen3-0.6B \
-  --dataset-name random --random-input-len 256 --random-output-len 64
+In another terminal:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -N http://127.0.0.1:8000/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3","prompt":"A KV cache stores","max_tokens":16,"temperature":0,"stream":true}'
+curl http://127.0.0.1:8000/metrics
+```
+
+One process owns one model. Requests can join later iterations; model calls
+are serialized under an engine lock. Endpoints are OpenAI-shaped, not full
+wire compatibility; `model` is a response label, not multi-model routing. No
+authentication is provided: default bind is localhost.
+[Flags, endpoints, lifecycle and metric definitions](docs/USAGE.md).
+
+## Validate and reproduce
+
+```bash
+python -m pytest -q -o faulthandler_timeout=30
+python -m ruff check nanovllm_pp tests examples
 python -m nanovllm_pp.benchmarks.validate_paged_backend ./Qwen3-0.6B
+python -m nanovllm_pp.benchmarks.bench_runtime_evidence ./Qwen3-0.6B \
+  --output-dir runs/runtime_evidence --repeats 3 --num-prompts 12 --seed 17
 ```
 
-### Live terminal demos
+CPU tests use model doubles and require no checkpoint download. GPU tests skip
+without CUDA/Triton; a CPU-green CI run does not validate GPU execution. The
+suite covers randomized allocator audits, attention oracles, scheduler state,
+and failure/stream cleanup. New runs go to ignored `runs/`, leaving published
+evidence unchanged. [October 10 validation](docs/VALIDATION.md): **113 tests
+passed with CUDA visible**, plus server/install/package checks.
+[Complete reproduction workflow](docs/REPRODUCING.md).
 
-These three entry points print one stop-aware generation, then run the same
-deterministic fixed-output shared-prefix workload and report throughput, TTFT,
-TPOT, ITL, E2E latency, GPU memory, KV-page use, prefix reuse, and engine phase
-timing:
-
-```bash
-python nanovllm_pp/benchmarks/live_paged_baseline.py
-python nanovllm_pp/benchmarks/live_paged_optimized.py
-python nanovllm_pp/benchmarks/live_hf_reference.py
-```
-
-The scripts use `$NVPP_MODEL` when set, otherwise detect the adjacent local
-`Qwen3-0.6B` checkout used by this project and finally fall back to the
-`Qwen/Qwen3-0.6B` Hugging Face ID. Pass `--model PATH` to override it and
-`--help` to see workload and cache-size controls. The baseline paged run has
-chunked prefill and prefix caching disabled; the optimized paged run enables
-both. The HF reference enables chunked prefill but cannot enable physical
-prefix sharing because its `DynamicCache` belongs to each request.
-
-Benchmarks warm the model and synchronize CUDA around timed regions, but they
-remain workload examples rather than universal performance claims. Record the
-model revision, hardware/power mode, software versions, sample distribution,
-request shapes, precision, and output correctness before comparing runs.
-
-## Repository map
+## Architecture and repository map
 
 ```text
-nanovllm_pp/
-├── engine/           sequence, logical blocks, scheduler, model runner, engine
-├── paged/            Qwen3 model, global KV runner, Triton page kernels
-├── scheduling/       token budget and mixed chunked-prefill policy
-├── spec_decode/      n-gram proposer, greedy verifier, integrated manager
-├── quantization/     per-channel INT8 and packed INT4 teaching modules
-├── observability/    phase/request metrics and JSONL tracing
-├── server/           FastAPI completion/chat/SSE surface
-├── benchmarks/       reproducible benchmark entry points
-└── tutorials/        three progressive executable examples
-tests/                deterministic CPU tests with a tiny causal-model double
+Caller / HTTP -> LLMEngine.step() -> Scheduler -> ModelRunner -> model + KV pool
+                                      |              ^
+                                      v              |
+                                 BlockManager -------+
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the architecture, implementation
-invariants, known limitations, and validation plan. The exact RTX 5050
-environment, synchronized measurements, parity results, and caveats are in
-[docs/GPU_VALIDATION.md](docs/GPU_VALIDATION.md). Design lineage and external
-comparison points are recorded in [docs/REFERENCES.md](docs/REFERENCES.md).
-The fixed-shape, concurrency, ShareGPT, arrival-rate, and physical-prefix
-results are in [docs/STANDARD_BENCHMARKS.md](docs/STANDARD_BENCHMARKS.md), with
-machine-readable JSON under `benchmark_results/`.
+The scheduler chooses work under token/sequence budgets. The block manager
+owns page identity, references and prefix hashes. The paged runner owns tensor
+bytes and builds device metadata; model/kernels execute computation.
+Postprocessing commits valid KV, updates state, and releases finished requests.
 
-## License
+| Location | Responsibility |
+|---|---|
+| [engine/](nanovllm_pp/engine/) | Request state, allocation, scheduler, engine loop and HF runner |
+| [paged/](nanovllm_pp/paged/) | Custom Qwen3, global KV pool, device block tables and Triton kernels |
+| [scheduling/](nanovllm_pp/scheduling/) | Token-budget policy and chunked prefill |
+| [spec_decode/](nanovllm_pp/spec_decode/) | N-gram proposal and exact greedy target verification |
+| [quantization/](nanovllm_pp/quantization/) | Per-channel INT8 / packed INT4 storage prototypes |
+| [server/](nanovllm_pp/server/) / [observability/](nanovllm_pp/observability/) | HTTP/SSE, cleanup, traces and metrics |
+| [benchmarks/](nanovllm_pp/benchmarks/) / [examples/](examples/) | Workload harnesses and runnable entry points |
+| [tests/](tests/) / [docs/](docs/README.md) | Correctness contracts, API and reproduction |
+| [benchmark_results/](benchmark_results/README.md) | Dated machine-readable measurement evidence |
 
-MIT
+The paged backend supports standard full-attention `Qwen3ForCausalLM` models
+with even head dimension ≤256. Unsupported families, sliding windows,
+non-default RoPE and bitsandbytes loading are rejected. Only full, physically
+computed prefix pages are shared; mutable partial pages are never aliased.
+Speculation is greedy n-gram lookahead, **not a separate draft model**;
+stochastic sampling and stop strings use ordinary one-token decoding.
+Ordinary mixed iterations use at most two forwards; per-request speculative
+verification can add forwards. Pool exhaustion reports no progress rather
+than silently swapping.
+
+[Detailed design / invariants](docs/DESIGN.md) ·
+[Design lineage / references](docs/REFERENCES.md) · [MIT license](LICENSE)

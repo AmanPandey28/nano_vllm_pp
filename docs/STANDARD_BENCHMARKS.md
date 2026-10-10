@@ -1,5 +1,10 @@
 # RTX 5050 serving-workload benchmarks
 
+The October 6 controlled same-runner batching, warm/cold prefix, and bounded
+KV-pressure experiments are in [RUNTIME_EVIDENCE.md](RUNTIME_EVIDENCE.md).
+This document retains the earlier standard-workload sweep and its original
+software/measurement context.
+
 This report records the standard-workload sweep run on August 24, 2026. The
 machine, checkpoint, and software stack match [GPU_VALIDATION.md](GPU_VALIDATION.md).
 Raw JSON results are retained under
@@ -32,7 +37,7 @@ effects in this implementation.
 The workload names and primary metrics follow current vLLM benchmark
 conventions: fixed-shape random data, ShareGPT, and prefix repetition; request,
 input-token, output-token, and total-token throughput; TTFT, TPOT, ITL, and E2E.
-See the official [vLLM benchmark CLI documentation](https://github.com/vllm-project/vllm/blob/main/docs/benchmarking/cli.md).
+See the official [vLLM benchmark CLI documentation](https://docs.vllm.ai/en/latest/cli/bench/serve/).
 
 Each row below is one warmed synchronized run. Laptop clocks and power were not
 locked. The latency percentiles from 8--16 requests are descriptive and should
@@ -143,7 +148,7 @@ python -m nanovllm_pp.benchmarks.bench_serving ./Qwen3-0.6B \
   --request-rate inf \
   --kv-cache-num-blocks 512 \
   --max-model-len 512 \
-  --save-result result.json
+  --save-result runs/result.json
 ```
 
 Use `--dataset-name sharegpt --dataset-path DATA.json` for ShareGPT, or

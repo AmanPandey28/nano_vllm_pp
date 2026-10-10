@@ -1,0 +1,495 @@
+{
+  "manifest": {
+    "measured_at_utc": "2026-10-06T06:19:21.601476+00:00",
+    "command": "python -m nanovllm_pp.benchmarks.bench_loading_evidence ./Qwen3-0.6B --output benchmark_results/runtime_evidence/quantized_loading.json --repeats 3 --max-tokens 12",
+    "python": "3.12.12 | packaged by conda-forge | (main, Oct 22 2025, 23:25:55) [GCC 14.3.0]",
+    "packages": {
+      "torch": "2.12.0",
+      "transformers": "5.11.0",
+      "triton": "3.7.0",
+      "bitsandbytes": "0.49.2",
+      "accelerate": "1.14.0"
+    },
+    "cuda": {
+      "device": "cuda:0",
+      "name": "NVIDIA GeForce RTX 5050 Laptop GPU",
+      "compute_capability": "12.0",
+      "total_memory_mib": 7708,
+      "torch_version": "2.12.0+cu130",
+      "torch_cuda_version": "13.0",
+      "bfloat16_supported": true
+    },
+    "model_sha256": {
+      "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+      "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+    },
+    "clocks_power_locked": false,
+    "git_revision": "fe112115e486bced3e871c8e4b9faa92d142fd44",
+    "git_status": " M nanovllm_pp/benchmarks/serving_harness.py\n M nanovllm_pp/engine/block_manager.py\n M nanovllm_pp/engine/llm_engine.py\n M nanovllm_pp/engine/scheduler.py\n M nanovllm_pp/observability/profiler.py\n M nanovllm_pp/server/app.py\n M tests/test_benchmark_serving.py\n M tests/test_model_runner_scheduler.py\n?? benchmark_results/runtime_evidence/\n?? nanovllm_pp/benchmarks/bench_loading_evidence.py\n?? nanovllm_pp/benchmarks/bench_runtime_evidence.py\n?? nanovllm_pp/benchmarks/evidence.py\n?? tests/test_kv_invariants.py\n?? tests/test_request_cleanup.py",
+    "gpu_state": "NVIDIA GeForce RTX 5050 Laptop GPU, 595.91.07, P8, 51, 532 MHz, 7.67 W, [N/A]"
+  },
+  "prompts": [
+    "The capital of France is",
+    "Machine learning is a field of",
+    "Python is a programming language"
+  ],
+  "quality_texts": [
+    "A transformer predicts the next token from the tokens it has already seen. The key and value cache avoids recomputing representations of earlier tokens.",
+    "An inference scheduler balances latency, throughput, and memory capacity. Requests may have different prompt lengths and generate different numbers of tokens.",
+    "Quantization reduces the storage needed for neural network weights. Numerical error and extra conversion work can affect accuracy and execution time."
+  ],
+  "output_tokens_per_request": 12,
+  "formats": {
+    "bf16": {
+      "loaded_torch_allocated_bytes": 1192115200,
+      "loaded_torch_allocated_gib": 1.110243797302246,
+      "peak_load_torch_allocated_bytes": 1192115200,
+      "peak_generation_torch_allocated_bytes": 1233417216,
+      "counted_parameter_buffer_storage": {
+        "actual_bytes": 1192100352,
+        "parameter_bytes": 1192099840,
+        "buffer_bytes": 512,
+        "actual_mb": 1136.9,
+        "parameter_mb": 1136.9,
+        "buffer_mb": 0.0
+      },
+      "load_and_conversion_seconds": 3.726596320979297,
+      "generation_samples_seconds": [
+        0.5108874769939575,
+        0.47839030099567026,
+        0.4699002020061016
+      ],
+      "median_generation_seconds": 0.47839030099567026,
+      "output_tokens_per_second": 75.25236177462934,
+      "quality": {
+        "finite_logits": true,
+        "teacher_forced_tokens": 75,
+        "mean_token_nll": 4.84057139078776,
+        "scope": "three fixed synthetic texts; diagnostic only, not a task accuracy or corpus perplexity score",
+        "last_logit_cosine_vs_bf16": [
+          0.9999960064888,
+          0.9999850988388062,
+          0.9999958276748657
+        ],
+        "last_logit_max_abs_error_vs_bf16": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "exact_greedy_completion_matches_vs_bf16": 3
+      },
+      "converted_skipped_linear_counts": null,
+      "generated_token_ids": [
+        [
+          12095,
+          13,
+          576,
+          6722,
+          315,
+          15344,
+          374,
+          21718,
+          13,
+          576,
+          6722,
+          315
+        ],
+        [
+          3920,
+          429,
+          5711,
+          25185,
+          311,
+          1281,
+          11181,
+          3118,
+          389,
+          821,
+          13,
+          1084
+        ],
+        [
+          429,
+          374,
+          13570,
+          1483,
+          304,
+          279,
+          2070,
+          315,
+          20443,
+          11229,
+          13,
+          1084
+        ]
+      ],
+      "generated_text": [
+        " Paris. The capital of Italy is Rome. The capital of",
+        " study that uses algorithms to make decisions based on data. It",
+        " that is widely used in the field of artificial intelligence. It"
+      ]
+    },
+    "nf4": {
+      "loaded_torch_allocated_bytes": 538939392,
+      "loaded_torch_allocated_gib": 0.5019264221191406,
+      "peak_load_torch_allocated_bytes": 1005689344,
+      "peak_generation_torch_allocated_bytes": 547338240,
+      "counted_parameter_buffer_storage": {
+        "actual_bytes": 531497472,
+        "parameter_bytes": 531496960,
+        "buffer_bytes": 512,
+        "actual_mb": 506.9,
+        "parameter_mb": 506.9,
+        "buffer_mb": 0.0
+      },
+      "load_and_conversion_seconds": 6.251801880978746,
+      "generation_samples_seconds": [
+        0.9098414000181947,
+        0.9168828830006532,
+        0.9171750069945119
+      ],
+      "median_generation_seconds": 0.9168828830006532,
+      "output_tokens_per_second": 39.26346610614428,
+      "quality": {
+        "finite_logits": true,
+        "teacher_forced_tokens": 75,
+        "mean_token_nll": 4.878105875651042,
+        "scope": "three fixed synthetic texts; diagnostic only, not a task accuracy or corpus perplexity score",
+        "last_logit_cosine_vs_bf16": [
+          0.9644601345062256,
+          0.9780290126800537,
+          0.972907304763794
+        ],
+        "last_logit_max_abs_error_vs_bf16": [
+          3.3046875,
+          2.8125,
+          3.25
+        ],
+        "exact_greedy_completion_matches_vs_bf16": 0
+      },
+      "converted_skipped_linear_counts": null,
+      "generated_token_ids": [
+        [
+          30743,
+          4950,
+          362,
+          13,
+          12095,
+          425,
+          13,
+          55201,
+          356,
+          13,
+          87693,
+          422
+        ],
+        [
+          6366,
+          8038,
+          429,
+          374,
+          11658,
+          448,
+          279,
+          4401,
+          315,
+          25185,
+          11,
+          4119
+        ],
+        [
+          429,
+          374,
+          1483,
+          311,
+          1855,
+          3162,
+          13,
+          1084,
+          374,
+          1083,
+          264,
+          1602
+        ]
+      ],
+      "generated_text": [
+        " _____. A. Paris B. Lyon C. Marseille D",
+        " computer science that is concerned with the development of algorithms, models",
+        " that is used to create software. It is also a very"
+      ]
+    },
+    "bnb_int8": {
+      "loaded_torch_allocated_bytes": 786119680,
+      "loaded_torch_allocated_gib": 0.7321310043334961,
+      "peak_load_torch_allocated_bytes": 1252869632,
+      "peak_generation_torch_allocated_bytes": 803502592,
+      "counted_parameter_buffer_storage": {
+        "actual_bytes": 751698432,
+        "parameter_bytes": 751697920,
+        "buffer_bytes": 512,
+        "actual_mb": 716.9,
+        "parameter_mb": 716.9,
+        "buffer_mb": 0.0
+      },
+      "load_and_conversion_seconds": 1.090106943011051,
+      "generation_samples_seconds": [
+        2.576068185007898,
+        2.5703378400066867,
+        2.557063054002356
+      ],
+      "median_generation_seconds": 2.5703378400066867,
+      "output_tokens_per_second": 14.005940946621378,
+      "quality": {
+        "finite_logits": true,
+        "teacher_forced_tokens": 75,
+        "mean_token_nll": 4.9471122233072915,
+        "scope": "three fixed synthetic texts; diagnostic only, not a task accuracy or corpus perplexity score",
+        "last_logit_cosine_vs_bf16": [
+          0.9984577894210815,
+          0.9989783763885498,
+          0.9987572431564331
+        ],
+        "last_logit_max_abs_error_vs_bf16": [
+          0.70172119140625,
+          0.65625,
+          0.6796875
+        ],
+        "exact_greedy_completion_matches_vs_bf16": 2
+      },
+      "converted_skipped_linear_counts": null,
+      "generated_token_ids": [
+        [
+          12095,
+          13,
+          576,
+          6722,
+          315,
+          9625,
+          374,
+          1083,
+          279,
+          6722,
+          315,
+          279
+        ],
+        [
+          3920,
+          429,
+          5711,
+          25185,
+          311,
+          1281,
+          11181,
+          3118,
+          389,
+          821,
+          13,
+          1084
+        ],
+        [
+          429,
+          374,
+          13570,
+          1483,
+          304,
+          279,
+          2070,
+          315,
+          20443,
+          11229,
+          13,
+          1084
+        ]
+      ],
+      "generated_text": [
+        " Paris. The capital of France is also the capital of the",
+        " study that uses algorithms to make decisions based on data. It",
+        " that is widely used in the field of artificial intelligence. It"
+      ]
+    },
+    "int8_storage": {
+      "loaded_torch_allocated_bytes": 757283840,
+      "loaded_torch_allocated_gib": 0.7052755355834961,
+      "peak_load_torch_allocated_bytes": 1672694784,
+      "peak_generation_torch_allocated_bytes": 788085760,
+      "counted_parameter_buffer_storage": {
+        "actual_bytes": 753074688,
+        "parameter_bytes": 311296000,
+        "buffer_bytes": 441778688,
+        "actual_mb": 718.2,
+        "parameter_mb": 296.9,
+        "buffer_mb": 421.3
+      },
+      "load_and_conversion_seconds": 0.7732480450067669,
+      "generation_samples_seconds": [
+        1.3039579370233696,
+        1.392982771008974,
+        1.2772364980191924
+      ],
+      "median_generation_seconds": 1.3039579370233696,
+      "output_tokens_per_second": 27.60825251938691,
+      "quality": {
+        "finite_logits": true,
+        "teacher_forced_tokens": 75,
+        "mean_token_nll": 4.941196695963542,
+        "scope": "three fixed synthetic texts; diagnostic only, not a task accuracy or corpus perplexity score",
+        "last_logit_cosine_vs_bf16": [
+          0.9989961385726929,
+          0.9989809989929199,
+          0.9994075894355774
+        ],
+        "last_logit_max_abs_error_vs_bf16": [
+          0.625,
+          0.65625,
+          0.46875
+        ],
+        "exact_greedy_completion_matches_vs_bf16": 3
+      },
+      "converted_skipped_linear_counts": [
+        196,
+        1
+      ],
+      "generated_token_ids": [
+        [
+          12095,
+          13,
+          576,
+          6722,
+          315,
+          15344,
+          374,
+          21718,
+          13,
+          576,
+          6722,
+          315
+        ],
+        [
+          3920,
+          429,
+          5711,
+          25185,
+          311,
+          1281,
+          11181,
+          3118,
+          389,
+          821,
+          13,
+          1084
+        ],
+        [
+          429,
+          374,
+          13570,
+          1483,
+          304,
+          279,
+          2070,
+          315,
+          20443,
+          11229,
+          13,
+          1084
+        ]
+      ],
+      "generated_text": [
+        " Paris. The capital of Italy is Rome. The capital of",
+        " study that uses algorithms to make decisions based on data. It",
+        " that is widely used in the field of artificial intelligence. It"
+      ]
+    },
+    "int4_storage": {
+      "loaded_torch_allocated_bytes": 533937152,
+      "loaded_torch_allocated_gib": 0.4972677230834961,
+      "peak_load_torch_allocated_bytes": 1450920960,
+      "peak_generation_torch_allocated_bytes": 577321984,
+      "counted_parameter_buffer_storage": {
+        "actual_bytes": 532873728,
+        "parameter_bytes": 311296000,
+        "buffer_bytes": 221577728,
+        "actual_mb": 508.2,
+        "parameter_mb": 296.9,
+        "buffer_mb": 211.3
+      },
+      "load_and_conversion_seconds": 0.7404339579807129,
+      "generation_samples_seconds": [
+        2.055616972997086,
+        2.0531661350105423,
+        2.039854550996097
+      ],
+      "median_generation_seconds": 2.0531661350105423,
+      "output_tokens_per_second": 17.533895278189533,
+      "quality": {
+        "finite_logits": true,
+        "teacher_forced_tokens": 75,
+        "mean_token_nll": 5.521042683919271,
+        "scope": "three fixed synthetic texts; diagnostic only, not a task accuracy or corpus perplexity score",
+        "last_logit_cosine_vs_bf16": [
+          0.7912102341651917,
+          0.9047873020172119,
+          0.898678183555603
+        ],
+        "last_logit_max_abs_error_vs_bf16": [
+          7.96484375,
+          7.078125,
+          6.296875
+        ],
+        "exact_greedy_completion_matches_vs_bf16": 0
+      },
+      "converted_skipped_linear_counts": [
+        196,
+        1
+      ],
+      "generated_token_ids": [
+        [
+          279,
+          6722,
+          315,
+          279,
+          6722,
+          315,
+          279,
+          6722,
+          315,
+          279,
+          6722,
+          315
+        ],
+        [
+          3920,
+          11,
+          323,
+          432,
+          374,
+          264,
+          2070,
+          315,
+          3920,
+          11,
+          323,
+          432
+        ],
+        [
+          11,
+          323,
+          279,
+          2038,
+          374,
+          5326,
+          304,
+          13027,
+          11,
+          323,
+          279,
+          2038
+        ]
+      ],
+      "generated_text": [
+        " the capital of the capital of the capital of the capital of",
+        " study, and it is a field of study, and it",
+        ", and the code is written in Python, and the code"
+      ]
+    }
+  }
+}

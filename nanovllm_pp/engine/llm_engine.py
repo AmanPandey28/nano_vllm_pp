@@ -66,7 +66,12 @@ class LLMEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        model_kwargs = {"trust_remote_code": True}
+        # Keep the non-quantized embeddings/norms/head in the requested dtype
+        # as well as setting the NF4 matmul compute dtype.
+        model_kwargs = {
+            "trust_remote_code": True,
+            **model_dtype_kwargs(self.compute_dtype),
+        }
         if load_in_4bit and device.type == "cuda":
             from transformers import BitsAndBytesConfig
 
@@ -84,9 +89,6 @@ class LLMEngine:
                 load_in_8bit=True,
             )
             model_kwargs["device_map"] = {"": device.index}
-        else:
-            model_kwargs.update(model_dtype_kwargs(self.compute_dtype))
-
         if (load_in_4bit or load_in_8bit) and device.type != "cuda":
             raise RuntimeError(
                 "bitsandbytes 4/8-bit loading is supported only on CUDA in "
@@ -328,6 +330,16 @@ class LLMEngine:
             raise RuntimeError("cannot forget an unfinished request")
         del self._sequences[request_id]
 
+    def abort_request(self, request_id: str, reason="cancelled"):
+        """Cancel a request at an iteration boundary and reclaim its pages."""
+        seq = self.get_request(request_id)
+        if seq is None or seq.status == SequenceStatus.FINISHED:
+            return
+        self.scheduler.abort(seq, reason)
+        seq.completion_time = time.perf_counter()
+        if self._request_tracker:
+            self._request_tracker.requests.pop(request_id, None)
+
     def _mark_stop_strings(self, scheduled):
         for seq in scheduled.seqs:
             if not seq.sampling_params.stop or not seq.generated_token_ids:
@@ -368,6 +380,17 @@ class LLMEngine:
             model_kind = "decode"
         else:
             model_kind = "mixed"
+        self.last_schedule_stats = {
+            **self.block_manager.stats(),
+            "waiting_requests": len(self.scheduler.waiting),
+            "running_requests": len(self.scheduler.running),
+            "scheduled_requests": len(scheduled),
+            "scheduled_tokens": sum(item.num_tokens for item in scheduled.items),
+            "prefill_tokens": sum(
+                item.num_tokens for item in scheduled.prefill_items()
+            ),
+            "mode": model_kind,
+        }
         if self._trace:
             block_state = self.block_manager.stats()
             self._trace.add(
@@ -382,8 +405,19 @@ class LLMEngine:
         if self._profiler:
             self._profiler.tick(model_kind)
 
-        output_tokens = self.model_runner.run(scheduled)
-        self._mark_stop_strings(scheduled)
+        try:
+            output_tokens = self.model_runner.run(scheduled)
+            self._mark_stop_strings(scheduled)
+        except Exception:
+            # Some layers may have written K/V before a model error. Do not
+            # publish/reuse any of this batch's pages, including shared ones.
+            for seq in scheduled.seqs:
+                for block_id in seq.block_table:
+                    block = self.block_manager.blocks[block_id]
+                    if self.block_manager.hash_to_block_id.get(block.hash) == block_id:
+                        del self.block_manager.hash_to_block_id[block.hash]
+                self.abort_request(seq.request_id, reason="error")
+            raise
 
         if self._profiler:
             self._profiler.tick(model_kind)

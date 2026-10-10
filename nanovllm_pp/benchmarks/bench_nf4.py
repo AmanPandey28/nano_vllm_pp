@@ -116,7 +116,7 @@ def run_int8(model_path, prompts, max_tokens, device):
 if __name__ == "__main__":
     model_path = sys.argv[1] if len(sys.argv) > 1 else None
     if model_path is None:
-        model_path = "/home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B"
+        model_path = "Qwen/Qwen3-0.6B"
 
     prompts = [
         "The capital of France is",

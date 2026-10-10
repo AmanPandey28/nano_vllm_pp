@@ -1,0 +1,7 @@
+# Separate October 6 loading/fidelity environment; not the serving environment.
+# Install PyTorch 2.12.0 from the cu130 index first; see docs/REPRODUCING.md.
+torch==2.12.0
+transformers==5.11.0
+triton==3.7.0
+accelerate==1.14.0
+bitsandbytes==0.49.2

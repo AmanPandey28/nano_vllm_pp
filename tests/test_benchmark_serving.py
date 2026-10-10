@@ -167,6 +167,10 @@ def test_percentiles_and_request_metrics_include_itl_and_prefix_hits():
     assert metrics["output_token_throughput_tps"] == 12.5
     assert metrics["cached_prompt_tokens"] == 4
     assert metrics["prefix_cache_hit_fraction"] == 0.25
+    assert metrics["prefix_hit_requests"] == 1
+    assert metrics["prefix_request_hit_fraction"] == 0.5
+    assert metrics["prefill_tokens_computed"] == 12
+    assert metrics["processed_token_throughput_tps"] == 37.5
     assert metrics["latency_ms"]["itl"]["p50"] == pytest.approx(200)
 
 

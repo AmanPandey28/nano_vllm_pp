@@ -244,6 +244,13 @@ def serving_metrics_snapshot(engine) -> dict:
         "free_logical_blocks": state["blocks"]["free_blocks"],
         "used_logical_blocks": state["blocks"]["used_blocks"],
         "total_logical_blocks": state["blocks"]["total_blocks"],
+        "kv_utilization": state["blocks"]["used_blocks"] / state["blocks"]["total_blocks"],
+        "prefix_cache": {
+            key: state["blocks"].get(key, 0)
+            for key in ("admitted_requests", "prefix_hit_requests", "prefix_tokens_reused",
+                        "prefix_token_hit_fraction", "evictions", "allocation_failures")
+        },
+        "timestamp_boundary": "engine enqueue to computed token / engine completion; excludes HTTP transport",
         "engine_steps": engine.step_counter,
         "profiled_requests": request_report.get("num_requests", 0),
         "request_latency_ms": {

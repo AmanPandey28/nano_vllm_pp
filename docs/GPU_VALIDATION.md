@@ -1,5 +1,12 @@
 # RTX 5050 GPU validation
 
+The newer controlled same-runner measurements and 104-test validation are in
+[RUNTIME_EVIDENCE.md](RUNTIME_EVIDENCE.md). The current reproduced NF4 memory
+figure is **1.11→0.50 GiB loaded CUDA allocation**, with software, metric
+boundary, fidelity, and latency results in
+[QUANTIZATION_SCOPE.md](QUANTIZATION_SCOPE.md). The dated runs below remain
+historical evidence rather than being silently replaced by new numbers.
+
 This is a retained environment manifest and smoke/performance record for one
 laptop. It is evidence for these exact runs, not a universal performance claim.
 
@@ -66,7 +73,7 @@ The repeatable end-to-end command is:
 
 ```bash
 python -m nanovllm_pp.benchmarks.validate_paged_backend \
-  /home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B
+  ./Qwen3-0.6B
 ```
 
 With 64 four-token pages it allocated a physical tensor of shape
@@ -130,7 +137,7 @@ longer parity caveat above. Reproduce the run with:
 
 ```bash
 python -m nanovllm_pp.benchmarks.bench_paged_backend \
-  /home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B
+  ./Qwen3-0.6B
 ```
 
 ## Observed synchronized results

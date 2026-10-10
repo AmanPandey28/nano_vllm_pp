@@ -57,6 +57,8 @@ class BlockManager:
     def __init__(
         self, num_blocks: int, block_size: int, enable_prefix_caching: bool = False
     ):
+        if num_blocks <= 0 or block_size <= 0:
+            raise ValueError("num_blocks and block_size must be positive")
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.enable_prefix_caching = enable_prefix_caching
@@ -65,6 +67,16 @@ class BlockManager:
         self.free_block_ids = set(range(num_blocks))
         self.used_block_ids = set()
         self.hash_to_block_id: dict = {}
+        self.reset_metrics()
+
+    def reset_metrics(self):
+        """Reset counters without discarding physical cached pages."""
+        self.admitted_requests = 0
+        self.prefix_hit_requests = 0
+        self.prompt_tokens_admitted = 0
+        self.prefix_tokens_reused = 0
+        self.evictions = 0
+        self.allocation_failures = 0
 
     def required_blocks(self, num_tokens: int) -> int:
         return math.ceil(num_tokens / self.block_size)
@@ -96,6 +108,7 @@ class BlockManager:
 
     def allocate_fresh_block(self):
         if not self.free_block_ids:
+            self.allocation_failures += 1
             raise RuntimeError("Out of KV cache blocks.")
         block_id = self.free_block_ids.pop()
         self.used_block_ids.add(block_id)
@@ -105,6 +118,7 @@ class BlockManager:
         # contents.
         if block.hash is not None and self.hash_to_block_id.get(block.hash) == block_id:
             del self.hash_to_block_id[block.hash]
+            self.evictions += 1
         block.ref_count = 1
         block.hash = None
         block.token_ids = []
@@ -156,11 +170,12 @@ class BlockManager:
         Attempts prefix cache matching on full blocks first. If a cached
         block is found, its ref_count is incremented and the block is
         shared. Otherwise a fresh block is allocated and its hash is
-        registered for future reuse.
+        published for future reuse only after all physical K/V writes complete.
         """
         if seq.block_table:
             raise RuntimeError("cannot allocate an already-allocated sequence")
         if not self.can_allocate(seq, num_new_tokens):
+            self.allocation_failures += 1
             raise RuntimeError("Out of KV cache blocks while admitting prompt.")
 
         prompt_tokens = seq.token_ids[: seq.prompt_len]
@@ -192,11 +207,21 @@ class BlockManager:
                 block.hash = compute_block_hash(parent_hash, block.token_ids)
             seq.block_table.append(fresh_id)
 
+        self.admitted_requests += 1
+        self.prompt_tokens_admitted += seq.prompt_len
+        self.prefix_hit_requests += bool(reusable)
+        self.prefix_tokens_reused += seq.num_cached_tokens
+
     def may_append(self, seq, num_new_tokens: int = 1) -> bool:
         """Reserve logical blocks for upcoming generated token positions.
 
         Returns True if allocation succeeded or was not needed.
         """
+        # Reserve atomically: a failed multi-page request must not consume a
+        # subset of the remaining pool and prevent another request progressing.
+        if not self.can_append(seq, num_new_tokens):
+            self.allocation_failures += 1
+            return False
         needed = self.required_blocks(len(seq.token_ids) + max(0, num_new_tokens))
         while needed > len(seq.block_table):
             if not self.free_block_ids:
@@ -220,10 +245,8 @@ class BlockManager:
     def slot_mapping(self, seq, token_positions) -> list[int]:
         """Map logical token positions to flat physical cache-slot numbers.
 
-        Production cache-write kernels consume the same information, commonly
-        as an integer tensor.  This teaching implementation returns Python
-        integers because stock Hugging Face attention does not accept a slot
-        mapping.
+        The paged runner copies these Python integers to a device tensor for
+        the Triton scatter-write kernel. The HF runner uses private cache tensors.
         """
         slots = []
         for position in token_positions:
@@ -306,6 +329,12 @@ class BlockManager:
         returned to the free pool but retain their hash entries for
         potential future prefix cache reuse.
         """
+        # Validate ownership before changing any reference count.
+        if len(set(seq.block_table)) != len(seq.block_table):
+            raise RuntimeError("a request block table contains duplicate pages")
+        for block_id in seq.block_table:
+            if self.blocks[block_id].ref_count <= 0:
+                raise RuntimeError("cannot release an unreferenced KV block")
         for block_id in seq.block_table:
             block = self.blocks[block_id]
             block.ref_count -= 1
@@ -313,6 +342,25 @@ class BlockManager:
                 self.used_block_ids.discard(block_id)
                 self.free_block_ids.add(block_id)
         seq.block_table.clear()
+
+    def assert_invariants(self, live_sequences):
+        """Debug/test audit; callers supply every request owning a block table."""
+        counts = [0] * self.num_blocks
+        for seq in live_sequences:
+            assert len(set(seq.block_table)) == len(seq.block_table)
+            for block_id in seq.block_table:
+                assert 0 <= block_id < self.num_blocks
+                counts[block_id] += 1
+        assert self.free_block_ids.isdisjoint(self.used_block_ids)
+        assert self.free_block_ids | self.used_block_ids == set(range(self.num_blocks))
+        for block in self.blocks:
+            assert block.ref_count == counts[block.block_id]
+            assert (block.block_id in self.free_block_ids) == (block.ref_count == 0)
+            assert 0 <= block.computed_tokens <= len(block.token_ids) <= self.block_size
+        for block_hash, block_id in self.hash_to_block_id.items():
+            block = self.blocks[block_id]
+            assert block.hash == block_hash
+            assert block.computed_tokens == self.block_size
 
     def hash_prompt_blocks(self, token_ids):
         """Compute chained hashes for all full blocks in a token list."""
@@ -337,6 +385,16 @@ class BlockManager:
             "free_blocks": self.num_free_blocks,
             "used_blocks": len(self.used_block_ids),
             "cached_hashes": len(self.hash_to_block_id),
+            "kv_utilization": len(self.used_block_ids) / self.num_blocks,
+            "admitted_requests": self.admitted_requests,
+            "prefix_hit_requests": self.prefix_hit_requests,
+            "prefix_tokens_reused": self.prefix_tokens_reused,
+            "prefix_token_hit_fraction": (
+                self.prefix_tokens_reused / self.prompt_tokens_admitted
+                if self.prompt_tokens_admitted else 0.0
+            ),
+            "evictions": self.evictions,
+            "allocation_failures": self.allocation_failures,
         }
 
     def debug_state(self):

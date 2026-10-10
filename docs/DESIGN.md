@@ -144,8 +144,9 @@ backend makes its addresses part of model execution.
 ## 6. Scheduler and chunked prefill
 
 Without chunking, waiting requests are admitted for full prefill under
-`max_num_batched_tokens` and `max_num_seqs`; decode begins when the waiting
-queue is empty.
+`max_num_batched_tokens` and `max_num_seqs`. Waiting prompts that cannot fit
+rotate; if none can be admitted, running decode is allowed to reclaim pages.
+`max_num_seqs` limits work items in an iteration, not the total live requests.
 
 With chunking, `MixedBatchScheduler` builds one iteration:
 
@@ -159,12 +160,52 @@ Rotation avoids a long prompt monopolizing the head of the FIFO while short
 prompts could fit. The HF compatibility runner invokes the model per item. The
 paged runner flattens all scheduled prefill tokens into one projection/model
 batch and all ordinary decode requests into another. A mixed scheduling
-iteration therefore uses at most two forwards because prefill needs causal
+iteration without speculation therefore uses at most two forwards because prefill needs causal
 multi-token attention while decode uses the direct page kernel. Output row
-indices scatter sampled tokens back to requests.
+indices scatter sampled tokens back to requests. Speculative verification is
+performed per request and can add model forwards; the two-forward bound does
+not apply to speculative iterations.
 
 If unfinished work exists but no item can be scheduled, `LLMEngine.step()`
 raises with queue/block state instead of spinning forever.
+
+Multi-page append reservations are atomic: failure consumes no free pages.
+`abort_request()` releases waiting, partially prefilled, and running requests.
+The HTTP app releases ownership on stream closure, rejects partially valid
+multi-prompt submissions transactionally, and waits for an in-flight model
+thread before releasing its lock on cancellation. Model-forward failure
+invalidates the batch's published cache identities and releases the affected
+requests. A failed CUDA context itself may require process restart; Python
+cleanup is not recovery from an unrecoverable device fault.
+
+There is no preemption/swap or guaranteed admission under arbitrary KV
+oversubscription. If every active request needs a new page and the pool is
+full, the engine reports no progress; callers can cancel work, or use a larger
+pool / smaller admitted workload. This limitation is tested and stated rather
+than hidden behind an infinite scheduler loop.
+
+SHA-256 keys contain the previous full-block hash and signed 64-bit local token
+IDs. Local token IDs and physical-validity metadata are checked again on a
+lookup. Equal current blocks under different parent hashes do not share. The
+implementation assumes SHA-256 collisions do not occur: an ancestor collision
+with identical local tokens is not independently verified against the entire
+prefix. The pool is scoped to one model instance, with no cross-model/adaptor
+reuse, cache salt, persistence, or tenant-isolation claim. This policy follows
+the parent-hash/full-block structure described in the
+[vLLM prefix-caching design](https://docs.vllm.ai/en/latest/design/prefix_caching/),
+but the free set here has no production LRU eviction policy.
+
+`BlockManager.assert_invariants(all_live_sequences)` checks exact refcounts,
+the disjoint/complete free and used sets, valid physical-token ranges, and
+published full-page identities. It is a debug/test audit, not hot-path work.
+The seeded tests run 1,500 operation/check iterations and separately cover 18
+length/page-size boundaries, sharing, stale-hash eviction, poisoned lookup
+metadata, and failed reservation atomicity. GPU tests compare FP16/BF16 paged
+write/decode with a PyTorch oracle across partial pages, MHA/GQA, non-power-of-two
+head dimensions, noncontiguous queries, and NaN-filled unused cache slots.
+
+See [RUNTIME_EVIDENCE.md](RUNTIME_EVIDENCE.md) for the same-runner benchmark
+and [QUANTIZATION_SCOPE.md](QUANTIZATION_SCOPE.md) for loading/compute scope.
 
 ## 7. Sampling and termination
 

@@ -14,6 +14,7 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from anyio import CancelScope
 
 from ..observability.profiler import serving_metrics_snapshot
 
@@ -88,16 +89,33 @@ def create_app(engine, SamplingParams):
         )
 
     async def add_requests(prompts, params):
+        request_ids = []
         try:
             async with step_lock:
-                return [engine.add_request(prompt, params) for prompt in prompts]
+                try:
+                    for prompt in prompts:
+                        request_ids.append(engine.add_request(prompt, params))
+                except (TypeError, ValueError, NotImplementedError):
+                    for rid in request_ids:
+                        engine.abort_request(rid)
+                        engine.forget_request(rid)
+                    raise
+                return request_ids
         except (TypeError, ValueError, NotImplementedError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async def step_once():
         try:
             async with step_lock:
-                return await asyncio.to_thread(engine.step)
+                worker = asyncio.create_task(asyncio.to_thread(engine.step))
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Cancellation must not release the lock while the model
+                    # thread is still mutating scheduler/KV state.
+                    with CancelScope(shield=True):
+                        await worker
+                    raise
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -114,10 +132,22 @@ def create_app(engine, SamplingParams):
             return outputs
 
     async def drive(request_ids):
-        while not await all_finished(request_ids):
-            await step_once()
-            await asyncio.sleep(0)
-        return await snapshot_outputs(request_ids, forget=True)
+        try:
+            while not await all_finished(request_ids):
+                await step_once()
+                await asyncio.sleep(0)
+            return await snapshot_outputs(request_ids, forget=True)
+        finally:
+            await release_requests(request_ids)
+
+    async def release_requests(request_ids):
+        # Starlette uses level-triggered AnyIO cancellation on disconnect;
+        # shield the cleanup so its lock acquisition cannot be cancelled again.
+        with CancelScope(shield=True):
+            async with step_lock:
+                for rid in request_ids:
+                    engine.abort_request(rid)
+                    engine.forget_request(rid)
 
     @api.get("/health")
     async def health():
@@ -169,6 +199,13 @@ def create_app(engine, SamplingParams):
 
     async def stream_completion(req: CompletionRequest, params):
         request_id = (await add_requests([req.prompt], params))[0]
+        try:
+            async for chunk in stream_tokens(req, request_id):
+                yield chunk
+        finally:
+            await release_requests([request_id])
+
+    async def stream_tokens(req, request_id):
         previous = ""
         while not await all_finished([request_id]):
             await step_once()

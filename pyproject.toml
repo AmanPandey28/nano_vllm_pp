@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,7 +29,7 @@ dependencies = [
 server = ["fastapi>=0.100", "uvicorn", "pydantic>=2"]
 quantization = ["bitsandbytes"]
 paged = ["triton>=3.0", "safetensors>=0.4"]
-test = ["pytest"]
+test = ["pytest", "ruff", "httpx"]
 
 [project.urls]
 Homepage = "https://github.com/AmanPandey28/nano_vllm_pp"
@@ -40,3 +40,7 @@ Homepage = "https://github.com/AmanPandey28/nano_vllm_pp"
 
 [tool.setuptools.packages.find]
 include = ["nanovllm_pp*"]
+exclude = ["nanovllm_pp.docs*"]
+
+[tool.setuptools]
+include-package-data = false

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "engine": {
-    "model_path": "/home/aman/dev/Projects/nano_vllm_++/Qwen3-0.6B",
+    "model_path": "./Qwen3-0.6B",
     "model_backend": "paged",
     "dtype": "bfloat16",
     "block_size": 16,
@@ -21,7 +21,7 @@
   "workload": {
     "name": "sharegpt",
     "metadata": {
-      "dataset_path": "/tmp/ShareGPT_V3_unfiltered_cleaned_split.json",
+      "dataset_path": "./data/ShareGPT_V3_unfiltered_cleaned_split.json",
       "selected_requests": 16,
       "scanned_records": 18,
       "seed": 17,

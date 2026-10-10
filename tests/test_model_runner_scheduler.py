@@ -111,3 +111,44 @@ def test_chunked_prefill_rotates_long_prompt_behind_short_prompt():
         (short_seq, 2),
     ]
     assert list(scheduler.waiting) == [long_seq]
+
+
+def test_blocked_waiting_prompt_does_not_prevent_decode_reclamation():
+    config = tiny_engine_config()
+    blocks = BlockManager(num_blocks=2, block_size=2)
+    scheduler = Scheduler(config, blocks)
+    runner = ModelRunner(TinyCacheModel(), tiny_model_config(), config, "cpu", blocks)
+    first = Sequence([1, 2], SamplingParams(temperature=0, max_tokens=2))
+    scheduler.add(first)
+    batch = scheduler.schedule()
+    scheduler.postprocess(batch, runner.run(batch))
+    second = Sequence([5, 6], SamplingParams(temperature=0, max_tokens=1))
+    scheduler.add(second)
+    batch = scheduler.schedule()
+    assert batch.is_decode
+    assert scheduler.postprocess(batch, runner.run(batch)) == [first]
+    batch = scheduler.schedule()
+    assert batch.seqs == [second]
+    assert scheduler.postprocess(batch, runner.run(batch)) == [second]
+    blocks.assert_invariants([])
+
+
+def test_cancel_partially_prefilled_shared_request_releases_only_its_refs():
+    config = tiny_engine_config(enable_chunked_prefill=True, max_prefill_chunk_size=1)
+    blocks = BlockManager(12, 2, enable_prefix_caching=True)
+    first = Sequence([1, 2, 3], SamplingParams(max_tokens=3))
+    blocks.allocate(first, num_new_tokens=1)
+    blocks.mark_computed(first, 0, 3)
+    scheduler = Scheduler(config, blocks)
+    second = Sequence([1, 2, 4, 5], SamplingParams(max_tokens=3))
+    scheduler.add(second)
+    scheduler.schedule()
+    shared = first.block_table[0]
+    assert blocks.blocks[shared].ref_count == 2
+    scheduler.abort(second)
+    scheduler.abort(second)
+    assert second.status == SequenceStatus.FINISHED
+    assert second.finish_reason == "cancelled"
+    assert blocks.blocks[shared].ref_count == 1
+    assert not scheduler.has_unfinished()
+    blocks.assert_invariants([first])

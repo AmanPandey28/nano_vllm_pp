@@ -79,7 +79,12 @@ class Scheduler:
             return ScheduledBatch(items)
 
         if self.waiting:
-            return self._schedule_prefill_only()
+            batch = self._schedule_prefill_only()
+            if batch:
+                return batch
+            # A waiting prompt may need pages owned by a running request. Let
+            # decode finish that request instead of reporting false deadlock.
+            return self._schedule_decode_only()
         if self.running:
             return self._schedule_decode_only()
         return ScheduledBatch([])
@@ -89,21 +94,22 @@ class Scheduler:
         budget = self.config.max_num_batched_tokens
         max_seqs = self.config.max_num_seqs
 
-        while self.waiting and len(scheduled) < max_seqs:
+        for _ in range(len(self.waiting)):
+            if not self.waiting or len(scheduled) >= max_seqs:
+                break
             seq = self.waiting[0]
             cached = self.block_manager.cached_prefix_tokens(seq)
             remaining = seq.prompt_len - cached
             if remaining > budget:
-                break
+                self.waiting.rotate(-1)
+                continue
             # The final prefill forward emits the first generated token, so its
             # logical cache slot must be admitted together with the prompt.
             if not self.block_manager.can_allocate(seq, num_new_tokens=1):
-                break
+                self.waiting.rotate(-1)
+                continue
+            self.block_manager.allocate(seq, num_new_tokens=1)
             self.waiting.popleft()
-            try:
-                self.block_manager.allocate(seq, num_new_tokens=1)
-            except RuntimeError:
-                break
             seq.num_computed_tokens = seq.num_cached_tokens
             seq.status = SequenceStatus.RUNNING
             scheduled.append(
@@ -163,8 +169,15 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         if seq in self.running:
             self.running.remove(seq)
+        if seq in self.waiting:
+            self.waiting.remove(seq)
         if hasattr(seq, "_kv_cache"):
             del seq._kv_cache
+
+    def abort(self, seq, reason="cancelled"):
+        """Release waiting, partially prefilled, or running request resources."""
+        if seq.status != SequenceStatus.FINISHED:
+            self._finish(seq, reason)
 
     def postprocess(self, scheduled_batch, output_tokens):
         """Update sequence state after model execution.

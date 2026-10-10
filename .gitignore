@@ -23,3 +23,19 @@ venv/
 *.pt
 *.pth
 Qwen*/
+TUTORIAL_GUIDE.md
+.ruff_cache/
+.codex/
+.agents/
+.aws/
+AGENTS.md
+
+# Local documents are not source or distribution assets.
+*.pdf
+*.tex
+nanovllm_pp/docs/
+
+# New experiments must not overwrite checked-in evidence.
+runs/
+data/
+*.jsonl

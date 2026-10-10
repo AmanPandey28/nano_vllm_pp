@@ -1,0 +1,23 @@
+name: CPU tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e '.[test,server]'
+      - run: python -m ruff check nanovllm_pp tests examples
+      - run: python -m pytest -q -o faulthandler_timeout=30
+      - run: python -m nanovllm_pp.server --help

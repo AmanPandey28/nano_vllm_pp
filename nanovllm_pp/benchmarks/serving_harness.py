@@ -28,6 +28,7 @@ class RequestRecord:
     token_times: list[float] = field(default_factory=list)
     completion_time: float | None = None
     generated_token_ids: list[int] = field(default_factory=list)
+    prompt_token_ids: list[int] = field(default_factory=list)
 
 
 def percentile(values, percent: float) -> float:
@@ -65,12 +66,14 @@ def request_metrics(records: list[RequestRecord], duration_s: float) -> dict:
     total_input = 0
     total_output = 0
     total_cached = 0
+    hit_requests = 0
     for record in records:
         if record.completion_time is None or not record.token_times:
             raise ValueError("every benchmark request must complete and emit a token")
         total_input += record.prompt_tokens
         total_output += len(record.token_times)
         total_cached += record.cached_prompt_tokens
+        hit_requests += record.cached_prompt_tokens > 0
         ttft.append((record.token_times[0] - record.send_time) * 1000)
         e2e.append((record.completion_time - record.send_time) * 1000)
         client_wait.append((record.send_time - record.scheduled_time) * 1000)
@@ -95,6 +98,12 @@ def request_metrics(records: list[RequestRecord], duration_s: float) -> dict:
             (total_input + total_output) / duration_s, 3
         ),
         "cached_prompt_tokens": total_cached,
+        "prefill_tokens_computed": total_input - total_cached,
+        "processed_token_throughput_tps": round(
+            (total_input - total_cached + total_output - len(records)) / duration_s, 3
+        ),
+        "prefix_hit_requests": hit_requests,
+        "prefix_request_hit_fraction": hit_requests / len(records),
         "prefix_cache_hit_fraction": round(
             total_cached / total_input if total_input else 0.0, 6
         ),
@@ -156,6 +165,7 @@ def run_serving_workload(
     max_concurrency: int,
     seed: int,
     save_detailed: bool = False,
+    prefix_cache_state: str = "warm",
 ) -> dict:
     """Run a closed-concurrency workload with optional Poisson arrivals.
 
@@ -168,8 +178,13 @@ def run_serving_workload(
         raise ValueError("max_concurrency must be positive")
     if engine.scheduler.has_unfinished():
         raise RuntimeError("benchmark requires an idle engine")
+    if prefix_cache_state not in {"warm", "cold"}:
+        raise ValueError("prefix_cache_state must be 'warm' or 'cold'")
 
     _warm_engine(engine, workload)
+    if prefix_cache_state == "cold":
+        engine.block_manager.hash_to_block_id.clear()
+    engine.block_manager.reset_metrics()
     engine.enable_profiling()
     device = torch.device(engine.device)
     synchronize(device)
@@ -186,6 +201,8 @@ def run_serving_workload(
     next_request = 0
     maximum_concurrency = 0
     maximum_pages_used = 0
+    maximum_waiting = 0
+    schedule_samples = []
     benchmark_start = time.perf_counter()
 
     while next_request < len(workload.requests) or active_ids:
@@ -213,15 +230,22 @@ def run_serving_workload(
                 prompt_tokens=sequence.prompt_len,
                 requested_output_tokens=request.output_tokens,
                 request_id=request_id,
+                prompt_token_ids=list(sequence.token_ids),
             )
             active_ids.add(request_id)
             next_request += 1
             maximum_concurrency = max(maximum_concurrency, len(active_ids))
+            maximum_waiting = max(maximum_waiting, len(engine.scheduler.waiting))
 
         if engine.scheduler.has_unfinished():
             engine.step()
             synchronize(device)
             observed_time = time.perf_counter()
+            # Sample before postprocess can free a one-token request's pages.
+            schedule_state = dict(engine.last_schedule_stats)
+            maximum_pages_used = max(maximum_pages_used, schedule_state["used_blocks"])
+            if save_detailed:
+                schedule_samples.append({"time": observed_time, **schedule_state})
             finished_ids = []
             for request_id in active_ids:
                 sequence = engine.get_request(request_id)
@@ -244,16 +268,13 @@ def run_serving_workload(
                 completed.append(record)
                 active_ids.remove(request_id)
                 engine.forget_request(request_id)
-            maximum_pages_used = max(
-                maximum_pages_used, engine.block_manager.stats()["used_blocks"]
-            )
             continue
 
         if next_request < len(workload.requests):
             wake_time = benchmark_start + offsets[next_request]
             delay = wake_time - time.perf_counter()
             if delay > 0:
-                time.sleep(delay)
+                time.sleep(min(delay, 0.05))
             continue
         if active_ids:
             raise RuntimeError("active requests remain but the engine has no work")
@@ -268,6 +289,9 @@ def run_serving_workload(
         {
             "max_concurrency_observed": maximum_concurrency,
             "max_physical_pages_used": maximum_pages_used,
+            "max_kv_utilization": maximum_pages_used / engine.num_kv_blocks,
+            "max_waiting_requests": maximum_waiting,
+            "prefix_cache_start_state": prefix_cache_state,
             "resident_gpu_bytes": resident_bytes,
             "peak_gpu_bytes": (
                 torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
@@ -285,4 +309,5 @@ def run_serving_workload(
         }
     if save_detailed:
         metrics["requests"] = [asdict(record) for record in completed]
+        metrics["scheduler_iterations"] = schedule_samples
     return metrics
