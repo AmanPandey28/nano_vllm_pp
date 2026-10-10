@@ -18,8 +18,9 @@ October 6 performance experiments.
 | Local documentation links | All resolved |
 | Public artifact consistency tests | CSV and per-case summaries agree with raw trials; README serving rates agree with artifacts |
 
-The new CPU CI workflow runs lint/tests on Python 3.10 and 3.12 without
-downloading a checkpoint. Its GPU tests intentionally skip; only a GPU-visible
+The CPU CI workflow runs lint/tests on Python 3.10 and 3.12 using PyTorch
+2.10.0 CPU, Transformers 5.8.1 and Accelerate 1.12.0, without downloading a
+checkpoint. Its GPU tests intentionally skip; only a GPU-visible
 run validates the kernels. Remote CI outcomes are separate from these local
 checks and must be inspected on GitHub.
 

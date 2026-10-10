@@ -1,7 +1,7 @@
 """Boundary and randomized KV ownership audits, independent of model weights."""
 
-from collections import Counter
 import random
+from collections import Counter
 
 import pytest
 

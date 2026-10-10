@@ -1,12 +1,12 @@
 """Environment manifests shared by reproducible runtime measurements."""
 
 import hashlib
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from nanovllm_pp.device import cuda_device_info
 

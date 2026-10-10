@@ -11,10 +11,10 @@ import json
 import time
 import uuid
 
+from anyio import CancelScope
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from anyio import CancelScope
 
 from ..observability.profiler import serving_metrics_snapshot
 

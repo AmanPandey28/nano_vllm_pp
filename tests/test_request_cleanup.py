@@ -4,8 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
 from conftest import TinyCacheModel, tiny_engine_config, tiny_model_config
+
 from nanovllm_pp.engine.block_manager import BlockManager
 from nanovllm_pp.engine.llm_engine import LLMEngine
 from nanovllm_pp.engine.model_runner import ModelRunner
@@ -75,6 +75,7 @@ def test_abort_waiting_and_running_requests_is_idempotent():
 def test_invalid_multi_prompt_http_submission_does_not_leave_partial_requests():
     pytest.importorskip("fastapi")
     from fastapi import HTTPException
+
     from nanovllm_pp.server.app import CompletionRequest, create_app
 
     engine = runtime()

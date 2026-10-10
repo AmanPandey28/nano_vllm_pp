@@ -7,22 +7,21 @@ before matmul; these are storage prototypes, not fused integer compute.
 import argparse
 import gc
 import json
-from pathlib import Path
 import statistics
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
 from nanovllm_pp import LLM, SamplingParams
-from nanovllm_pp.device import timed_call, synchronize
+from nanovllm_pp.device import synchronize, timed_call
 from nanovllm_pp.quantization.int8_weight_only import (
     model_memory_report,
-    quantize_model_int8,
     quantize_model_int4,
+    quantize_model_int8,
 )
 
 from .evidence import environment_manifest
-
 
 PROMPTS = (
     "The capital of France is",
@@ -30,12 +29,18 @@ PROMPTS = (
     "Python is a programming language",
 )
 QUALITY_TEXTS = (
-    "A transformer predicts the next token from the tokens it has already seen. "
-    "The key and value cache avoids recomputing representations of earlier tokens.",
-    "An inference scheduler balances latency, throughput, and memory capacity. "
-    "Requests may have different prompt lengths and generate different numbers of tokens.",
-    "Quantization reduces the storage needed for neural network weights. "
-    "Numerical error and extra conversion work can affect accuracy and execution time.",
+    (
+        "A transformer predicts the next token from the tokens it has already seen. "
+        "The key and value cache avoids recomputing representations of earlier tokens."
+    ),
+    (
+        "An inference scheduler balances latency, throughput, and memory capacity. "
+        "Requests may have different prompt lengths and generate different numbers of tokens."
+    ),
+    (
+        "Quantization reduces the storage needed for neural network weights. "
+        "Numerical error and extra conversion work can affect accuracy and execution time."
+    ),
 )
 
 

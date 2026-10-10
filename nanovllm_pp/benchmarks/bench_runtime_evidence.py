@@ -5,11 +5,11 @@ Run: python -m nanovllm_pp.benchmarks.bench_runtime_evidence MODEL --output-dir 
 
 import argparse
 import csv
-from dataclasses import asdict
 import json
 import math
-from pathlib import Path
 import statistics
+from dataclasses import asdict
+from pathlib import Path
 
 from nanovllm_pp import LLM
 
@@ -17,8 +17,8 @@ from .evidence import environment_manifest
 from .serving_harness import run_serving_workload
 from .workloads import (
     BenchmarkWorkload,
-    make_random_workload,
     make_prefix_repetition_workload,
+    make_random_workload,
 )
 
 
@@ -190,9 +190,10 @@ def main():
         engine.model_runner.kv_values,
     )
     import torch
+
     from nanovllm_pp.engine.block_manager import BlockManager
-    from nanovllm_pp.paged.runner import PagedModelRunner
     from nanovllm_pp.engine.scheduler import Scheduler
+    from nanovllm_pp.paged.runner import PagedModelRunner
 
     torch.cuda.empty_cache()
     engine.num_kv_blocks = 72
